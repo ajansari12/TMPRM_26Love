@@ -1248,6 +1248,19 @@ export default function VendorDetail() {
                       <MonitoringSignals vendorId={vendor.id} vendorName={vendor.legal_name} />
                     </div>
 
+                    {/* Risk Trajectory */}
+                    <div className="mt-4">
+                      <RiskTrajectoryChart
+                        vendorId={vendor.id}
+                        vendorName={vendor.legal_name}
+                        currentRiskRating={vendor.risk_rating}
+                        assessmentHistory={assessments?.map(a => ({
+                          date: a.assessment_date || a.created_at,
+                          risk_rating: a.risk_rating || 0,
+                        })).filter(a => a.risk_rating > 0) || []}
+                      />
+                    </div>
+
                     <div className="border-t border-slate-200 pt-4 space-y-2">
                       <div className="flex items-center text-sm">
                         <span className="text-slate-600 w-32">Assessment Source:</span>
