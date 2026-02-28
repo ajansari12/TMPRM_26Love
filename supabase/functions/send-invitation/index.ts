@@ -150,7 +150,6 @@ Deno.serve(async (req: Request) => {
     const roleLabel = getDefenseLineLabel(payload.defense_line);
 
     const resendApiKey = Deno.env.get("RESEND_API_KEY");
-    const sendgridApiKey = Deno.env.get("SENDGRID_API_KEY");
 
     let emailSent = false;
     let emailError: string | null = null;
@@ -224,50 +223,8 @@ Deno.serve(async (req: Request) => {
       } catch (e) {
         emailError = `Resend error: ${e.message}`;
       }
-    } else if (sendgridApiKey) {
-      try {
-        const emailResponse = await fetch(
-          "https://api.sendgrid.com/v3/mail/send",
-          {
-            method: "POST",
-            headers: {
-              Authorization: `Bearer ${sendgridApiKey}`,
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-              personalizations: [{ to: [{ email: payload.email }] }],
-              from: { email: "noreply@your-domain.com", name: "TPRM Platform" },
-              subject: `You've been invited to join ${payload.organization_name} on TPRM Platform`,
-              content: [
-                {
-                  type: "text/html",
-                  value: `
-                  <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-                    <h2>You've Been Invited!</h2>
-                    <p><strong>${payload.inviter_name}</strong> has invited you to join
-                       <strong>${payload.organization_name}</strong>.</p>
-                    <p><strong>Role:</strong> ${roleLabel}</p>
-                    <p><a href="${invitationLink}">Click here to accept your invitation</a></p>
-                    <p>This invitation expires in 7 days.</p>
-                  </div>
-                `,
-                },
-              ],
-            }),
-          }
-        );
-
-        if (emailResponse.ok || emailResponse.status === 202) {
-          emailSent = true;
-        } else {
-          const errorText = await emailResponse.text();
-          emailError = `SendGrid API error: ${errorText}`;
-        }
-      } catch (e) {
-        emailError = `SendGrid error: ${e.message}`;
-      }
     } else {
-      emailError = "No email service configured (RESEND_API_KEY or SENDGRID_API_KEY)";
+      emailError = "No email service configured (RESEND_API_KEY)";
       console.warn(emailError);
     }
 
