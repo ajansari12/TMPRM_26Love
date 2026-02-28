@@ -136,6 +136,7 @@ export function buildNavigation(
         { name: 'Compliance Overview', path: '/compliance', icon: CheckCircle2 },
         { name: 'OSFI B-10', path: '/compliance/osfi-b10', icon: Shield },
         { name: 'Attestations', path: '/attestations', icon: FileCheck },
+        { name: 'Regulatory Updates', path: '/regulatory-updates', icon: Globe2 },
       ],
     },
     {
