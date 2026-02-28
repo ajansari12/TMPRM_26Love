@@ -7,6 +7,7 @@ import { Vendor, TieringAssessment, AssessmentTaskType, OffboardingTask } from '
 import RiskSummaryCard from '../components/ai/RiskSummaryCard';
 import FinancialRiskCard from '../components/FinancialRiskCard';
 import MonitoringSignals from '../components/MonitoringSignals';
+import RiskTrajectoryChart from '../components/ai/RiskTrajectoryChart';
 import { formatDate, getStatusColor, isValidUUID } from '../lib/utils';
 import { useAuth } from '../contexts/AuthContext';
 import {
@@ -1240,6 +1241,11 @@ export default function VendorDetail() {
                           data_access_level: vendor.data_access_level,
                         }}
                       />
+                    </div>
+
+                    {/* Monitoring Signals */}
+                    <div className="mt-4">
+                      <MonitoringSignals vendorId={vendor.id} vendorName={vendor.legal_name} />
                     </div>
 
                     <div className="border-t border-slate-200 pt-4 space-y-2">
