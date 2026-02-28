@@ -24,8 +24,10 @@ import {
   RefreshCw,
   Info,
   ChevronRight,
+  BarChart3,
 } from 'lucide-react';
 import { logger } from '../lib/logger';
+import { calculateHHI, detectSingleSourceDependencies, type HHIResult } from '../lib/concentrationCalculations';
 
 interface VendorConcentration {
   vendor_id: string;
@@ -91,7 +93,11 @@ export default function ConcentrationDashboard() {
   const [concentrationBreaches, setConcentrationBreaches] = useState<ConcentrationBreach[]>([]);
   const [loading, setLoading] = useState(true);
   const [totalSpend, setTotalSpend] = useState(0);
-  const [activeView, setActiveView] = useState<'vendor' | 'category' | 'geographic'>('vendor');
+  const [activeView, setActiveView] = useState<'vendor' | 'category' | 'geographic' | 'hhi'>('vendor');
+  const [vendorHHI, setVendorHHI] = useState<HHIResult | null>(null);
+  const [categoryHHI, setCategoryHHI] = useState<HHIResult | null>(null);
+  const [geoHHI, setGeoHHI] = useState<HHIResult | null>(null);
+  const [singleSources, setSingleSources] = useState<Array<{ category: string; vendorName: string; value: number }>>([]);
 
   useEffect(() => {
     if (currentOrganization) {
@@ -180,6 +186,16 @@ export default function ConcentrationDashboard() {
         thresholdsRes.data || []
       );
       setConcentrationBreaches(breaches);
+
+      // HHI calculations
+      setVendorHHI(calculateHHI(vendorData.map(v => ({ name: v.legal_name, value: v.contract_value_cad }))));
+      setCategoryHHI(calculateHHI(categoryData.map(c => ({ name: c.display_name, value: c.total_value }))));
+      setGeoHHI(calculateHHI(geoData.map(g => ({ name: g.country, value: g.total_value }))));
+
+      // Single-source dependencies
+      setSingleSources(detectSingleSourceDependencies(
+        vendorData.map(v => ({ name: v.legal_name, category: v.service_category, value: v.contract_value_cad }))
+      ));
     } catch (error) {
       logger.error('Error fetching concentration data:', error);
     } finally {
@@ -549,6 +565,7 @@ export default function ConcentrationDashboard() {
               { id: 'vendor', label: 'By Vendor', icon: Building2 },
               { id: 'category', label: 'By Category', icon: Layers },
               { id: 'geographic', label: 'By Geography', icon: Globe },
+              { id: 'hhi', label: 'HHI Analysis', icon: BarChart3 },
             ].map((tab) => {
               const Icon = tab.icon;
               return (
@@ -788,6 +805,110 @@ export default function ConcentrationDashboard() {
                   })}
                 </div>
               </div>
+            </div>
+          )}
+
+          {activeView === 'hhi' && (
+            <div className="space-y-6">
+              <div>
+                <h3 className="text-lg font-semibold text-gray-900 mb-2">
+                  Herfindahl-Hirschman Index (HHI) Analysis
+                </h3>
+                <p className="text-sm text-gray-500 mb-6">
+                  HHI measures market concentration on a 0-10,000 scale. Below 1,500 = low concentration, 1,500-2,500 = moderate, above 2,500 = high concentration.
+                </p>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                {[
+                  { label: 'Vendor HHI', data: vendorHHI },
+                  { label: 'Category HHI', data: categoryHHI },
+                  { label: 'Geographic HHI', data: geoHHI },
+                ].map(({ label, data }) => (
+                  <div key={label} className="border border-gray-200 rounded-lg p-5">
+                    <h4 className="text-sm font-medium text-gray-600 mb-2">{label}</h4>
+                    <div className="flex items-end gap-2 mb-2">
+                      <p className={`text-3xl font-bold ${
+                        data?.level === 'high' ? 'text-red-600' :
+                        data?.level === 'moderate' ? 'text-amber-600' : 'text-emerald-600'
+                      }`}>
+                        {data?.score?.toLocaleString() || '—'}
+                      </p>
+                      <span className="text-xs text-gray-500 mb-1">/ 10,000</span>
+                    </div>
+                    <div className="w-full bg-gray-200 rounded-full h-2 mb-2">
+                      <div
+                        className={`h-2 rounded-full transition-all ${
+                          data?.level === 'high' ? 'bg-red-500' :
+                          data?.level === 'moderate' ? 'bg-amber-500' : 'bg-emerald-500'
+                        }`}
+                        style={{ width: `${Math.min(((data?.score || 0) / 10000) * 100, 100)}%` }}
+                      />
+                    </div>
+                    <p className={`text-xs font-medium ${
+                      data?.level === 'high' ? 'text-red-600' :
+                      data?.level === 'moderate' ? 'text-amber-600' : 'text-emerald-600'
+                    }`}>
+                      {data?.label || 'N/A'}
+                    </p>
+                    <p className="text-xs text-gray-500 mt-1">{data?.description || ''}</p>
+
+                    {data?.topContributors && data.topContributors.length > 0 && (
+                      <div className="mt-3 pt-3 border-t border-gray-100">
+                        <p className="text-xs font-medium text-gray-600 mb-1.5">Top Contributors</p>
+                        {data.topContributors.slice(0, 3).map((c, i) => (
+                          <div key={i} className="flex items-center justify-between text-xs py-0.5">
+                            <span className="text-gray-700 truncate mr-2">{c.name}</span>
+                            <span className="text-gray-500 shrink-0">{c.share}%</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+
+              {/* HHI Scale Reference */}
+              <div className="bg-gray-50 rounded-lg p-4">
+                <h4 className="text-sm font-medium text-gray-700 mb-3">HHI Scale Reference</h4>
+                <div className="flex items-center gap-0">
+                  <div className="flex-1 bg-emerald-100 rounded-l-full h-6 flex items-center justify-center text-xs font-medium text-emerald-800">
+                    Low (&lt;1,500)
+                  </div>
+                  <div className="flex-1 bg-amber-100 h-6 flex items-center justify-center text-xs font-medium text-amber-800">
+                    Moderate (1,500-2,500)
+                  </div>
+                  <div className="flex-1 bg-red-100 rounded-r-full h-6 flex items-center justify-center text-xs font-medium text-red-800">
+                    High (&gt;2,500)
+                  </div>
+                </div>
+              </div>
+
+              {/* Single-source dependencies */}
+              {singleSources.length > 0 && (
+                <div className="border border-amber-200 bg-amber-50 rounded-lg p-5">
+                  <div className="flex items-center gap-2 mb-3">
+                    <AlertTriangle className="w-5 h-5 text-amber-600" />
+                    <h4 className="text-sm font-semibold text-amber-900">
+                      Single-Source Dependencies ({singleSources.length})
+                    </h4>
+                  </div>
+                  <p className="text-xs text-amber-700 mb-3">
+                    These service categories have only one vendor — creating a single point of failure risk.
+                  </p>
+                  <div className="space-y-2">
+                    {singleSources.map((ss, i) => (
+                      <div key={i} className="flex items-center justify-between bg-white rounded-lg px-3 py-2 border border-amber-200">
+                        <div>
+                          <p className="text-sm font-medium text-gray-900">{ss.vendorName}</p>
+                          <p className="text-xs text-gray-500">{ss.category.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}</p>
+                        </div>
+                        <span className="text-sm font-medium text-gray-600">{formatCurrency(ss.value)}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           )}
 

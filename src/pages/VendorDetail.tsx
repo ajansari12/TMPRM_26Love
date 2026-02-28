@@ -5,6 +5,8 @@ import { logger } from '../lib/logger';
 import { useOrganization } from '../contexts/OrganizationContext';
 import { Vendor, TieringAssessment, AssessmentTaskType, OffboardingTask } from '../types';
 import RiskSummaryCard from '../components/ai/RiskSummaryCard';
+import FinancialRiskCard from '../components/FinancialRiskCard';
+import MonitoringSignals from '../components/MonitoringSignals';
 import { formatDate, getStatusColor, isValidUUID } from '../lib/utils';
 import { useAuth } from '../contexts/AuthContext';
 import {
@@ -1127,7 +1129,7 @@ export default function VendorDetail() {
                         </div>
                         <div>
                           <div className="flex items-center justify-between text-sm mb-1">
-                            <span className="text-slate-600">Risk Rating</span>
+                            <span className="text-slate-600">Inherent Risk</span>
                             <span className="font-medium text-slate-900">{vendor.risk_rating?.toFixed(2)} / 25</span>
                           </div>
                           <div className="w-full bg-slate-200 rounded-full h-2.5">
@@ -1140,10 +1142,66 @@ export default function VendorDetail() {
                               style={{ width: `${((vendor.risk_rating || 0) / 25) * 100}%` }}
                             />
                           </div>
-                          <div className="text-xs text-slate-500 mt-0.5 text-right">
-                            {(((vendor.risk_rating || 0) / 25) * 100).toFixed(0)}%
-                          </div>
                         </div>
+                        {(vendor as Record<string, unknown>).control_effectiveness_score != null && (vendor as Record<string, unknown>).control_effectiveness_score! > 0 && (
+                          <>
+                            <div>
+                              <div className="flex items-center justify-between text-sm mb-1">
+                                <span className="text-slate-600">Control Effectiveness</span>
+                                <span className="font-medium text-emerald-700">{(vendor as Record<string, unknown>).control_effectiveness_score as number}%</span>
+                              </div>
+                              <div className="w-full bg-slate-200 rounded-full h-2.5">
+                                <div
+                                  className="bg-emerald-500 h-2.5 rounded-full transition-all"
+                                  style={{ width: `${(vendor as Record<string, unknown>).control_effectiveness_score as number}%` }}
+                                />
+                              </div>
+                            </div>
+                            <div>
+                              <div className="flex items-center justify-between text-sm mb-1">
+                                <span className="text-slate-600 font-medium">Residual Risk</span>
+                                <span className="font-bold text-slate-900">
+                                  {((vendor as Record<string, unknown>).residual_risk_rating as number)?.toFixed(2) ?? vendor.risk_rating?.toFixed(2)} / 25
+                                </span>
+                              </div>
+                              <div className="w-full bg-slate-200 rounded-full h-2.5">
+                                <div
+                                  className={`h-2.5 rounded-full transition-all ${
+                                    (((vendor as Record<string, unknown>).residual_risk_rating as number) || 0) >= 15 ? 'bg-red-500' :
+                                    (((vendor as Record<string, unknown>).residual_risk_rating as number) || 0) >= 10 ? 'bg-orange-500' :
+                                    (((vendor as Record<string, unknown>).residual_risk_rating as number) || 0) >= 5 ? 'bg-amber-500' : 'bg-emerald-500'
+                                  }`}
+                                  style={{ width: `${((((vendor as Record<string, unknown>).residual_risk_rating as number) || 0) / 25) * 100}%` }}
+                                />
+                              </div>
+                              <div className="flex items-center gap-1.5 mt-1">
+                                <span className="text-xs text-emerald-600 font-medium">
+                                  {Math.round(((vendor.risk_rating || 0) - (((vendor as Record<string, unknown>).residual_risk_rating as number) || 0)) / (vendor.risk_rating || 1) * 100)}% risk reduction from controls
+                                </span>
+                              </div>
+                            </div>
+                          </>
+                        )}
+                        {(vendor as Record<string, unknown>).esg_score != null && ((vendor as Record<string, unknown>).esg_score as number) > 0 && (
+                          <div>
+                            <div className="flex items-center justify-between text-sm mb-1">
+                              <span className="text-slate-600">ESG Score</span>
+                              <span className={`font-medium ${
+                                ((vendor as Record<string, unknown>).esg_score as number) >= 3.5 ? 'text-red-600' :
+                                ((vendor as Record<string, unknown>).esg_score as number) >= 2.5 ? 'text-amber-600' : 'text-emerald-600'
+                              }`}>{((vendor as Record<string, unknown>).esg_score as number)?.toFixed(1)} / 5.0</span>
+                            </div>
+                            <div className="w-full bg-slate-200 rounded-full h-2.5">
+                              <div
+                                className={`h-2.5 rounded-full transition-all ${
+                                  ((vendor as Record<string, unknown>).esg_score as number) >= 3.5 ? 'bg-red-400' :
+                                  ((vendor as Record<string, unknown>).esg_score as number) >= 2.5 ? 'bg-amber-400' : 'bg-emerald-400'
+                                }`}
+                                style={{ width: `${((((vendor as Record<string, unknown>).esg_score as number) || 0) / 5) * 100}%` }}
+                              />
+                            </div>
+                          </div>
+                        )}
                       </div>
                     </div>
 
@@ -1165,6 +1223,21 @@ export default function VendorDetail() {
                           contract_value_cad: vendor.contract_value_cad,
                           handles_sensitive_data: vendor.handles_sensitive_data,
                           has_system_access: vendor.has_system_access,
+                        }}
+                      />
+                    </div>
+
+                    {/* Financial Risk Estimate */}
+                    <div className="mt-4">
+                      <FinancialRiskCard
+                        vendor={{
+                          tier: vendor.tier,
+                          contract_value_cad: vendor.contract_value_cad,
+                          service_category: vendor.service_category,
+                          handles_sensitive_data: vendor.handles_sensitive_data,
+                          is_critical: vendor.is_critical,
+                          has_system_access: vendor.has_system_access,
+                          data_access_level: vendor.data_access_level,
                         }}
                       />
                     </div>

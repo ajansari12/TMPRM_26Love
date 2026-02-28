@@ -160,6 +160,10 @@ export interface TierCalculationResult {
   impact_score: number;
   likelihood_score: number;
   risk_rating: number;
+  inherent_risk_rating?: number;
+  residual_risk_rating?: number;
+  control_effectiveness_score?: number;
+  esg_score?: number;
   reason?: string;
   score_breakdown?: ScoreBreakdown;
   exit_strategy_score?: number;
@@ -430,6 +434,67 @@ export function checkAutoCriticalRules(
   return null;
 }
 
+// Control Effectiveness Score (0-100%)
+// Measures how well vendor controls mitigate inherent risk
+export function calculateControlEffectiveness(assessment: Partial<TieringAssessment>): number {
+  const scores: number[] = [];
+
+  // CE1: Security certifications — more certs = better effectiveness
+  if (assessment.ce1_security_certifications && Array.isArray(assessment.ce1_security_certifications)) {
+    const certs = assessment.ce1_security_certifications.filter(c => c !== 'none');
+    if (certs.length >= 4) scores.push(1);
+    else if (certs.length >= 3) scores.push(1.5);
+    else if (certs.length >= 2) scores.push(2);
+    else if (certs.length >= 1) scores.push(3);
+    else scores.push(5);
+  }
+
+  // CE2-CE8: Direct score mapping
+  if (assessment.ce2_last_audit_findings) scores.push(getScore(assessment.ce2_last_audit_findings));
+  if (assessment.ce3_incident_response_maturity) scores.push(getScore(assessment.ce3_incident_response_maturity));
+  if (assessment.ce4_data_protection_controls) scores.push(getScore(assessment.ce4_data_protection_controls));
+  if (assessment.ce5_bcp_testing_frequency) scores.push(getScore(assessment.ce5_bcp_testing_frequency));
+  if (assessment.ce6_patch_management) scores.push(getScore(assessment.ce6_patch_management));
+  if (assessment.ce7_security_awareness_training) scores.push(getScore(assessment.ce7_security_awareness_training));
+  if (assessment.ce8_penetration_testing) scores.push(getScore(assessment.ce8_penetration_testing));
+
+  if (scores.length === 0) return 0;
+
+  // Average score on 1-5 scale, then convert to effectiveness percentage
+  // Score 1 = 100% effective, Score 5 = 0% effective
+  const avgScore = scores.reduce((a, b) => a + b, 0) / scores.length;
+  return Math.round(((5 - avgScore) / 4) * 100);
+}
+
+// ESG Risk Score (1-5 scale)
+export function calculateESGScore(assessment: Partial<TieringAssessment>): number {
+  const scores: number[] = [];
+
+  if (assessment.esg1_environmental_policy) scores.push(getScore(assessment.esg1_environmental_policy));
+  if (assessment.esg2_labor_practices) scores.push(getScore(assessment.esg2_labor_practices));
+  if (assessment.esg3_board_governance) scores.push(getScore(assessment.esg3_board_governance));
+  if (assessment.esg4_sanctions_pep_exposure) scores.push(getScore(assessment.esg4_sanctions_pep_exposure));
+  if (assessment.esg5_supply_chain_ethics) scores.push(getScore(assessment.esg5_supply_chain_ethics));
+  if (assessment.esg6_dei_metrics) scores.push(getScore(assessment.esg6_dei_metrics));
+
+  if (scores.length === 0) return 0;
+
+  return scores.reduce((a, b) => a + b, 0) / scores.length;
+}
+
+// Residual Risk = Inherent Risk × (1 - Control Effectiveness × dampening_factor)
+// Dampening factor (0.7) prevents residual from being zero even with perfect controls
+const CONTROL_DAMPENING_FACTOR = 0.7;
+
+export function calculateResidualRisk(
+  inherentRiskRating: number,
+  controlEffectivenessPercent: number
+): number {
+  if (controlEffectivenessPercent <= 0) return inherentRiskRating;
+  const effectiveReduction = (controlEffectivenessPercent / 100) * CONTROL_DAMPENING_FACTOR;
+  return Math.round(inherentRiskRating * (1 - effectiveReduction) * 100) / 100;
+}
+
 function applyArchetypeWeights(
   baseWeights: CategoryWeights,
   archetype: VendorArchetype
@@ -602,13 +667,19 @@ export function calculateTierAssessment(
       getScore(assessment.q47_negative_coverage) +
       getScore(assessment.q48_esg_concerns)) / 3;
 
+  // ESG score — integrated as a likelihood sub-factor
+  const esgScore = calculateESGScore(assessment);
+  const hasESGWeight = 'weight_esg' in adjustedWeights && typeof (adjustedWeights as Record<string, number>).weight_esg === 'number';
+  const esgWeight = hasESGWeight ? (adjustedWeights as Record<string, number>).weight_esg : 0;
+
   const likelihoodScore =
     adjustedWeights.weight_concentration * concentrationScore +
     adjustedWeights.weight_access_level * accessScore +
     adjustedWeights.weight_subcontractor * subcontractorScore +
     adjustedWeights.weight_legal_regulatory * legalScore +
     adjustedWeights.weight_operational_maturity * maturityScore +
-    adjustedWeights.weight_other_risks * otherRisksScore;
+    adjustedWeights.weight_other_risks * otherRisksScore +
+    (esgScore > 0 ? esgWeight * esgScore : 0);
 
   const exitStrategyScore = calculateExitStrategyScore(assessment);
   const bcpScore = calculateBCPScore(assessment);
@@ -652,14 +723,23 @@ export function calculateTierAssessment(
   const adjustedLikelihoodScore = Math.max(1, Math.min(5, likelihoodScore + osfiAdjustment));
   const riskRating = impactScore * adjustedLikelihoodScore;
 
+  // Control Effectiveness & Residual Risk
+  const controlEffectivenessScore = calculateControlEffectiveness(assessment);
+  const inherentRiskRating = Math.round(riskRating * 100) / 100;
+  const residualRiskRating = controlEffectivenessScore > 0
+    ? calculateResidualRisk(riskRating, controlEffectivenessScore)
+    : inherentRiskRating;
+
+  // Determine tier using residual risk (if control effectiveness data exists)
+  const tierBasis = controlEffectivenessScore > 0 ? residualRiskRating : riskRating;
   let tier: TierLevel;
-  if (riskRating >= thresholds.tier_5_critical) {
+  if (tierBasis >= thresholds.tier_5_critical) {
     tier = 'tier_5_critical';
-  } else if (riskRating >= thresholds.tier_4_high) {
+  } else if (tierBasis >= thresholds.tier_4_high) {
     tier = 'tier_4_high';
-  } else if (riskRating >= thresholds.tier_3_moderate) {
+  } else if (tierBasis >= thresholds.tier_3_moderate) {
     tier = 'tier_3_moderate';
-  } else if (riskRating >= thresholds.tier_2_low) {
+  } else if (tierBasis >= thresholds.tier_2_low) {
     tier = 'tier_2_low';
   } else {
     tier = 'tier_1_informational';
@@ -672,6 +752,10 @@ export function calculateTierAssessment(
     impact_score: Math.round(impactScore * 100) / 100,
     likelihood_score: Math.round(adjustedLikelihoodScore * 100) / 100,
     risk_rating: Math.round(riskRating * 100) / 100,
+    inherent_risk_rating: inherentRiskRating,
+    residual_risk_rating: Math.round(residualRiskRating * 100) / 100,
+    control_effectiveness_score: controlEffectivenessScore > 0 ? controlEffectivenessScore : undefined,
+    esg_score: esgScore > 0 ? Math.round(esgScore * 100) / 100 : undefined,
     exit_strategy_score: exitStrategyScore > 0 ? Math.round(exitStrategyScore * 100) / 100 : undefined,
     bcp_score: bcpScore > 0 ? Math.round(bcpScore * 100) / 100 : undefined,
     incident_response_score: incidentResponseScore > 0 ? Math.round(incidentResponseScore * 100) / 100 : undefined,
@@ -818,6 +902,10 @@ export function calculateRiskScores(
     impact_score: result.impact_score,
     likelihood_score: result.likelihood_score,
     risk_rating: result.risk_rating,
+    inherent_risk_rating: result.inherent_risk_rating,
+    residual_risk_rating: result.residual_risk_rating,
+    control_effectiveness_score: result.control_effectiveness_score,
+    esg_score: result.esg_score,
     is_auto_critical: result.is_auto_critical,
     exit_strategy_score: result.exit_strategy_score,
     bcp_score: result.bcp_score,
