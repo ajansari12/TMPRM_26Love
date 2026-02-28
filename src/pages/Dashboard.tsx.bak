@@ -1,0 +1,1954 @@
+import { useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
+import { supabase } from '../lib/supabase';
+import { logger } from '../lib/logger';
+import { useOrganization } from '../contexts/OrganizationContext';
+import { useAuth } from '../contexts/AuthContext';
+import { useDefenseLineAccess } from '../hooks/useDefenseLineAccess';
+import { Vendor } from '../types';
+import { tierConfig } from '../lib/riskCalculations';
+import { formatDate } from '../lib/utils';
+import {
+  OnboardingRequest,
+  ONBOARDING_STATUS_LABELS,
+  ONBOARDING_STATUS_COLORS,
+} from '../types/workflow';
+import {
+  PieChart,
+  Pie,
+  Cell,
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
+  Tooltip,
+  ResponsiveContainer,
+} from 'recharts';
+import {
+  Building2,
+  AlertTriangle,
+  FileText,
+  Calendar,
+  Shield,
+  Clock,
+  ArrowRight,
+  CheckCircle,
+  XCircle,
+  ShieldAlert,
+  RefreshCw,
+  FileCheck,
+  Lock,
+  Upload,
+  Briefcase,
+  Eye,
+  Users,
+  TrendingUp,
+  TrendingDown,
+  Minus,
+  Activity,
+  DollarSign,
+} from 'lucide-react';
+
+interface DashboardStats {
+  totalVendors: number;
+  criticalVendors: number;
+  pendingApprovals: number;
+  upcomingReviews: number;
+  tierDistribution: Array<{ name: string; value: number; color: string }>;
+  statusDistribution: Array<{ name: string; value: number }>;
+  riskDistribution: Array<{ range: string; count: number }>;
+}
+
+interface ComplianceStats {
+  total: number;
+  compliant: number;
+  partially_compliant: number;
+  non_compliant: number;
+  not_applicable: number;
+  not_assessed: number;
+  score: number;
+}
+
+interface ExceptionStats {
+  active: number;
+  pending: number;
+  expiringSoon: number;
+}
+
+interface ReassessmentDue {
+  id: string;
+  legal_name: string;
+  tier: string | null;
+  next_review_date: string;
+  daysUntilDue: number;
+  isOverdue: boolean;
+}
+
+interface PendingDocumentRequest {
+  id: string;
+  vendor_id: string | null;
+  document_type_code: string;
+  document_type_name: string;
+  status: string;
+  is_critical: boolean;
+  blocks_activation: boolean;
+  due_date: string;
+  days_overdue: number;
+  urgency: string;
+  vendor_name: string | null;
+}
+
+interface MyActiveRequest {
+  id: string;
+  request_number: string;
+  vendor_legal_name: string;
+  status: string;
+  updated_at: string;
+}
+
+interface ReviewQueueItem {
+  id: string;
+  request_number: string;
+  vendor_legal_name: string;
+  status: string;
+  submitted_at: string;
+  preliminary_risk_tier: string | null;
+  daysWaiting: number;
+}
+
+interface ReviewQueueMetrics {
+  averageWaitTime: number;
+  longestWaiting: number;
+  totalInQueue: number;
+}
+
+interface RiskOverviewData {
+  pending2ndReviews: number;
+  vendorsNeedingReassessment: number;
+  riskExceptionsExpiring: number;
+  recentHighIncidents: number;
+  trends: {
+    pending2ndReviews: number;
+    reassessments: number;
+    exceptions: number;
+    incidents: number;
+  };
+}
+
+interface AuditFocusData {
+  recentAuditEntries: number;
+  osfiComplianceScore: number;
+  upcomingAttestations: number;
+}
+
+interface SeniorApprovalMetrics {
+  totalContractValue: number;
+  criticalCount: number;
+  averageContractValue: number;
+}
+
+interface SystemHealthData {
+  pendingWorkflows: number;
+  oldestPendingDays: number;
+  bottleneckStage: string | null;
+  systemScore: number;
+}
+
+export default function Dashboard() {
+  const { currentOrganization, currentMembership, defenseLine } = useOrganization();
+  const { user } = useAuth();
+  const access = useDefenseLineAccess();
+  const [stats, setStats] = useState<DashboardStats | null>(null);
+  const [complianceStats, setComplianceStats] = useState<ComplianceStats | null>(null);
+  const [exceptionStats, setExceptionStats] = useState<ExceptionStats | null>(null);
+  const [criticalVendors, setCriticalVendors] = useState<Vendor[]>([]);
+  const [upcomingReviews, setUpcomingReviews] = useState<Vendor[]>([]);
+  const [reassessmentsDue, setReassessmentsDue] = useState<ReassessmentDue[]>([]);
+  const [pendingDocuments, setPendingDocuments] = useState<PendingDocumentRequest[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  // Role-specific state
+  const [myActiveRequests, setMyActiveRequests] = useState<MyActiveRequest[]>([]);
+  const [reviewQueue, setReviewQueue] = useState<ReviewQueueItem[]>([]);
+  const [reviewQueueMetrics, setReviewQueueMetrics] = useState<ReviewQueueMetrics | null>(null);
+  const [riskOverview, setRiskOverview] = useState<RiskOverviewData | null>(null);
+  const [auditFocus, setAuditFocus] = useState<AuditFocusData | null>(null);
+  const [seniorApprovals, setSeniorApprovals] = useState<MyActiveRequest[]>([]);
+  const [seniorApprovalMetrics, setSeniorApprovalMetrics] = useState<SeniorApprovalMetrics | null>(null);
+  const [systemHealth, setSystemHealth] = useState<SystemHealthData | null>(null);
+  const [roleDataLoading, setRoleDataLoading] = useState(false);
+
+  useEffect(() => {
+    if (currentOrganization?.id) {
+      fetchDashboardData();
+    } else {
+      setLoading(false);
+    }
+  }, [currentOrganization?.id]);
+
+  // Fetch role-specific data when defense line is available
+  useEffect(() => {
+    if (currentOrganization?.id && user?.id && defenseLine) {
+      fetchRoleSpecificData();
+    }
+  }, [currentOrganization?.id, user?.id, defenseLine]);
+
+  const fetchDashboardData = async () => {
+    if (!currentOrganization?.id) return;
+
+    try {
+      setLoading(true);
+      const [vendorsRes, requirementsRes, complianceRes, exceptionsRes, ddRequestsRes] = await Promise.all([
+        supabase
+          .from('vendors')
+          .select('*')
+          .eq('organization_id', currentOrganization.id)
+          .order('created_at', { ascending: false }),
+        supabase.from('osfi_b10_requirements').select('id'),
+        supabase
+          .from('osfi_b10_compliance_status')
+          .select('status')
+          .eq('organization_id', currentOrganization.id)
+          .is('vendor_id', null),
+        supabase
+          .from('risk_exceptions')
+          .select('id, status, expiry_date')
+          .eq('organization_id', currentOrganization.id),
+        supabase
+          .from('due_diligence_document_requests')
+          .select(`
+            id,
+            vendor_id,
+            document_type_code,
+            status,
+            is_critical,
+            blocks_activation,
+            due_date,
+            document_type:due_diligence_document_types(name),
+            vendor:vendors(legal_name)
+          `)
+          .eq('organization_id', currentOrganization.id)
+          .in('status', ['requested', 'received', 'under_review'])
+          .order('due_date', { ascending: true })
+          .limit(10),
+      ]);
+
+      if (vendorsRes.error) throw vendorsRes.error;
+
+      const vendors = vendorsRes.data || [];
+      calculateStats(vendors);
+      getCriticalVendors(vendors);
+      getUpcomingReviews(vendors);
+      calculateReassessmentsDue(vendors);
+
+      const totalRequirements = requirementsRes.data?.length || 0;
+      const statuses = complianceRes.data || [];
+      const compStats: ComplianceStats = {
+        total: totalRequirements,
+        compliant: statuses.filter((s) => s.status === 'compliant').length,
+        partially_compliant: statuses.filter((s) => s.status === 'partially_compliant').length,
+        non_compliant: statuses.filter((s) => s.status === 'non_compliant').length,
+        not_applicable: statuses.filter((s) => s.status === 'not_applicable').length,
+        not_assessed: totalRequirements - statuses.length,
+        score: 0,
+      };
+      const assessed = compStats.total - compStats.not_assessed - compStats.not_applicable;
+      compStats.score = assessed > 0
+        ? ((compStats.compliant + compStats.partially_compliant * 0.5) / assessed) * 100
+        : 0;
+      setComplianceStats(compStats);
+
+      const exceptions = exceptionsRes.data || [];
+      const thirtyDaysFromNow = new Date();
+      thirtyDaysFromNow.setDate(thirtyDaysFromNow.getDate() + 30);
+      setExceptionStats({
+        active: exceptions.filter((e) => e.status === 'approved').length,
+        pending: exceptions.filter((e) => e.status === 'pending').length,
+        expiringSoon: exceptions.filter((e) => {
+          if (e.status !== 'approved' || !e.expiry_date) return false;
+          const expiryDate = new Date(e.expiry_date);
+          return expiryDate <= thirtyDaysFromNow && expiryDate > new Date();
+        }).length,
+      });
+
+      const ddRequests = ddRequestsRes.data || [];
+      const today = new Date();
+      const processedDocs: PendingDocumentRequest[] = ddRequests.map((req) => {
+        const dueDate = new Date(req.due_date);
+        const daysOverdue = Math.floor((today.getTime() - dueDate.getTime()) / (1000 * 60 * 60 * 24));
+        let urgency = 'on_track';
+        if (daysOverdue > 0) urgency = 'overdue';
+        else if (daysOverdue >= -3) urgency = 'critical';
+        else if (daysOverdue >= -7) urgency = 'soon';
+
+        return {
+          id: req.id,
+          vendor_id: req.vendor_id,
+          document_type_code: req.document_type_code,
+          document_type_name: (req.document_type as { name: string } | null)?.name || req.document_type_code,
+          status: req.status,
+          is_critical: req.is_critical,
+          blocks_activation: req.blocks_activation,
+          due_date: req.due_date,
+          days_overdue: daysOverdue,
+          urgency,
+          vendor_name: (req.vendor as { legal_name: string } | null)?.legal_name || null,
+        };
+      });
+      setPendingDocuments(processedDocs);
+    } catch (error) {
+      logger.error('Error fetching dashboard data:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const calculateStats = (vendors: Vendor[]) => {
+    const totalVendors = vendors.length;
+    const criticalVendors = vendors.filter(
+      (v) => v.tier === 'tier_5_critical' || v.is_critical
+    ).length;
+    const pendingApprovals = vendors.filter((v) => v.status === 'pending_approval').length;
+
+    const thirtyDaysFromNow = new Date();
+    thirtyDaysFromNow.setDate(thirtyDaysFromNow.getDate() + 30);
+    const upcomingReviews = vendors.filter((v) => {
+      if (!v.next_review_date) return false;
+      const reviewDate = new Date(v.next_review_date);
+      return reviewDate <= thirtyDaysFromNow;
+    }).length;
+
+    const tierDistribution = [
+      {
+        name: 'Tier 5 - Critical',
+        value: vendors.filter((v) => v.tier === 'tier_5_critical').length,
+        color: '#ef4444',
+      },
+      {
+        name: 'Tier 4 - High',
+        value: vendors.filter((v) => v.tier === 'tier_4_high').length,
+        color: '#f97316',
+      },
+      {
+        name: 'Tier 3 - Moderate',
+        value: vendors.filter((v) => v.tier === 'tier_3_moderate').length,
+        color: '#f59e0b',
+      },
+      {
+        name: 'Tier 2 - Low',
+        value: vendors.filter((v) => v.tier === 'tier_2_low').length,
+        color: '#10b981',
+      },
+      {
+        name: 'Tier 1 - Informational',
+        value: vendors.filter((v) => v.tier === 'tier_1_informational').length,
+        color: '#64748b',
+      },
+      {
+        name: 'Not Assessed',
+        value: vendors.filter((v) => !v.tier).length,
+        color: '#94a3b8',
+      },
+    ].filter((item) => item.value > 0);
+
+    const statusDistribution = [
+      { name: 'Active', value: vendors.filter((v) => v.status === 'active').length },
+      { name: 'Pending', value: vendors.filter((v) => v.status === 'pending_approval').length },
+      { name: 'Under Review', value: vendors.filter((v) => v.status === 'under_review').length },
+      { name: 'Inactive', value: vendors.filter((v) => v.status === 'inactive').length },
+    ].filter((item) => item.value > 0);
+
+    const riskDistribution = [
+      { range: 'Critical (15+)', count: vendors.filter((v) => v.risk_rating && v.risk_rating >= 15).length },
+      { range: 'High (10-15)', count: vendors.filter((v) => v.risk_rating && v.risk_rating >= 10 && v.risk_rating < 15).length },
+      { range: 'Moderate (5-10)', count: vendors.filter((v) => v.risk_rating && v.risk_rating >= 5 && v.risk_rating < 10).length },
+      { range: 'Low (2-5)', count: vendors.filter((v) => v.risk_rating && v.risk_rating >= 2 && v.risk_rating < 5).length },
+      { range: 'Minimal (<2)', count: vendors.filter((v) => v.risk_rating && v.risk_rating < 2).length },
+    ];
+
+    setStats({
+      totalVendors,
+      criticalVendors,
+      pendingApprovals,
+      upcomingReviews,
+      tierDistribution,
+      statusDistribution,
+      riskDistribution,
+    });
+  };
+
+  const getCriticalVendors = (vendors: Vendor[]) => {
+    const critical = vendors
+      .filter((v) => v.tier === 'tier_5_critical' || v.is_critical)
+      .slice(0, 5);
+    setCriticalVendors(critical);
+  };
+
+  const getUpcomingReviews = (vendors: Vendor[]) => {
+    const thirtyDaysFromNow = new Date();
+    thirtyDaysFromNow.setDate(thirtyDaysFromNow.getDate() + 30);
+
+    const upcoming = vendors
+      .filter((v) => {
+        if (!v.next_review_date) return false;
+        const reviewDate = new Date(v.next_review_date);
+        return reviewDate <= thirtyDaysFromNow;
+      })
+      .sort((a, b) => {
+        const dateA = new Date(a.next_review_date!).getTime();
+        const dateB = new Date(b.next_review_date!).getTime();
+        return dateA - dateB;
+      })
+      .slice(0, 5);
+
+    setUpcomingReviews(upcoming);
+  };
+
+  const calculateReassessmentsDue = (vendors: Vendor[]) => {
+    const thirtyDaysFromNow = new Date();
+    thirtyDaysFromNow.setDate(thirtyDaysFromNow.getDate() + 30);
+    const now = new Date();
+
+    const dueVendors = vendors
+      .filter((v) => {
+        if (v.status !== 'active' || !v.next_review_date) return false;
+        const reviewDate = new Date(v.next_review_date);
+        return reviewDate <= thirtyDaysFromNow;
+      })
+      .map((v) => {
+        const reviewDate = new Date(v.next_review_date!);
+        const daysUntilDue = Math.ceil((reviewDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
+        return {
+          id: v.id,
+          legal_name: v.legal_name,
+          tier: v.tier,
+          next_review_date: v.next_review_date!,
+          daysUntilDue,
+          isOverdue: daysUntilDue < 0,
+        };
+      })
+      .sort((a, b) => a.daysUntilDue - b.daysUntilDue);
+
+    setReassessmentsDue(dueVendors);
+  };
+
+  // Role-specific data fetching
+  const fetchRoleSpecificData = async () => {
+    if (!currentOrganization?.id || !user?.id || !defenseLine) return;
+
+    setRoleDataLoading(true);
+    try {
+      switch (defenseLine) {
+        case '1a':
+          await fetchMyActiveRequests();
+          break;
+        case '1b':
+          await fetchReviewQueue();
+          break;
+        case '2nd':
+          await fetch2ndLineRiskOverview();
+          break;
+        case '3rd':
+          await fetch3rdLineAuditFocus();
+          break;
+        case 'senior_management':
+          await fetchSeniorApprovals();
+          break;
+        case 'admin':
+          // Admins see everything - fetch all sections
+          await Promise.all([
+            fetchMyActiveRequests(),
+            fetchReviewQueue(),
+            fetch2ndLineRiskOverview(),
+            fetch3rdLineAuditFocus(),
+            fetchSeniorApprovals(),
+            fetchSystemHealth(),
+          ]);
+          break;
+      }
+    } catch (error) {
+      logger.error('Error fetching role-specific data:', error);
+    } finally {
+      setRoleDataLoading(false);
+    }
+  };
+
+  const fetchMyActiveRequests = async () => {
+    if (!currentOrganization?.id || !user?.id) return;
+
+    try {
+      const { data, error } = await supabase
+        .from('onboarding_requests')
+        .select('id, request_number, vendor_legal_name, status, updated_at')
+        .eq('requested_by', user.id)
+        .eq('organization_id', currentOrganization.id)
+        .in('status', ['draft', 'submitted', '1b_review', '2nd_review', '1b_returned', '2nd_returned', 'pending_senior_approval'])
+        .order('updated_at', { ascending: false })
+        .limit(10);
+
+      if (error) throw error;
+      setMyActiveRequests(data || []);
+    } catch (error) {
+      logger.error('Error fetching my active requests:', error);
+      setMyActiveRequests([]);
+    }
+  };
+
+  const fetchReviewQueue = async () => {
+    if (!currentOrganization?.id) return;
+
+    try {
+      const { data, error } = await supabase
+        .from('onboarding_requests')
+        .select('id, request_number, vendor_legal_name, status, submitted_at, preliminary_risk_tier')
+        .eq('status', '1b_review')
+        .eq('organization_id', currentOrganization.id)
+        .order('submitted_at', { ascending: true })
+        .limit(10);
+
+      if (error) throw error;
+
+      const now = new Date();
+      const processedQueue: ReviewQueueItem[] = (data || []).map((item) => {
+        const submittedDate = new Date(item.submitted_at || '');
+        const daysWaiting = Math.floor((now.getTime() - submittedDate.getTime()) / (1000 * 60 * 60 * 24));
+        return {
+          ...item,
+          daysWaiting,
+        };
+      });
+
+      setReviewQueue(processedQueue);
+
+      // Calculate metrics
+      if (processedQueue.length > 0) {
+        const totalWaitTime = processedQueue.reduce((sum, item) => sum + item.daysWaiting, 0);
+        const averageWaitTime = Math.round(totalWaitTime / processedQueue.length);
+        const longestWaiting = Math.max(...processedQueue.map(item => item.daysWaiting));
+
+        setReviewQueueMetrics({
+          averageWaitTime,
+          longestWaiting,
+          totalInQueue: processedQueue.length,
+        });
+      } else {
+        setReviewQueueMetrics({
+          averageWaitTime: 0,
+          longestWaiting: 0,
+          totalInQueue: 0,
+        });
+      }
+    } catch (error) {
+      logger.error('Error fetching review queue:', error);
+      setReviewQueue([]);
+      setReviewQueueMetrics(null);
+    }
+  };
+
+  const fetch2ndLineRiskOverview = async () => {
+    if (!currentOrganization?.id) return;
+
+    try {
+      const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+      const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+      const sixtyDaysAgo = new Date(Date.now() - 60 * 24 * 60 * 60 * 1000).toISOString();
+
+      const { data: orgVendors } = await supabase
+        .from('vendors')
+        .select('id')
+        .eq('organization_id', currentOrganization.id);
+      const vendorIds = (orgVendors || []).map(v => v.id);
+
+      const [pending2ndRes, pending2ndLastWeekRes, reassessmentsRes, reassessmentsLastWeekRes, exceptionsRes, incidentsRes, incidentsLastWeekRes] = await Promise.all([
+        supabase
+          .from('onboarding_requests')
+          .select('id', { count: 'exact', head: true })
+          .eq('organization_id', currentOrganization.id)
+          .eq('status', '2nd_review'),
+        supabase
+          .from('onboarding_requests')
+          .select('id', { count: 'exact', head: true })
+          .eq('organization_id', currentOrganization.id)
+          .eq('status', '2nd_review')
+          .lte('updated_at', sevenDaysAgo),
+        supabase
+          .from('assessment_tasks')
+          .select('id', { count: 'exact', head: true })
+          .eq('organization_id', currentOrganization.id)
+          .in('task_type', ['periodic_reassessment', 'material_change', 'contract_renewal'])
+          .in('status', ['pending', 'in_progress']),
+        supabase
+          .from('assessment_tasks')
+          .select('id', { count: 'exact', head: true })
+          .eq('organization_id', currentOrganization.id)
+          .in('task_type', ['periodic_reassessment', 'material_change', 'contract_renewal'])
+          .in('status', ['pending', 'in_progress'])
+          .lte('created_at', sevenDaysAgo),
+        supabase
+          .from('risk_exceptions')
+          .select('id, expiry_date', { count: 'exact' })
+          .eq('organization_id', currentOrganization.id)
+          .eq('status', 'approved')
+          .not('expiry_date', 'is', null),
+        vendorIds.length > 0
+          ? supabase
+              .from('incidents')
+              .select('id', { count: 'exact', head: true })
+              .in('vendor_id', vendorIds)
+              .in('severity', ['high', 'critical'])
+              .gte('created_at', thirtyDaysAgo)
+          : Promise.resolve({ count: 0, data: null, error: null }),
+        vendorIds.length > 0
+          ? supabase
+              .from('incidents')
+              .select('id', { count: 'exact', head: true })
+              .in('vendor_id', vendorIds)
+              .in('severity', ['high', 'critical'])
+              .gte('created_at', sixtyDaysAgo)
+              .lte('created_at', thirtyDaysAgo)
+          : Promise.resolve({ count: 0, data: null, error: null }),
+      ]);
+
+      const thirtyDaysFromNow = new Date();
+      thirtyDaysFromNow.setDate(thirtyDaysFromNow.getDate() + 30);
+
+      const expiringSoon = (exceptionsRes.data || []).filter((e) => {
+        if (!e.expiry_date) return false;
+        const expiryDate = new Date(e.expiry_date);
+        return expiryDate <= thirtyDaysFromNow && expiryDate > new Date();
+      }).length;
+
+      const currentPending2nd = pending2ndRes.count || 0;
+      const lastWeekPending2nd = pending2ndLastWeekRes.count || 0;
+      const currentReassessments = reassessmentsRes.count || 0;
+      const lastWeekReassessments = reassessmentsLastWeekRes.count || 0;
+      const currentIncidents = incidentsRes.count || 0;
+      const lastPeriodIncidents = incidentsLastWeekRes.count || 0;
+
+      setRiskOverview({
+        pending2ndReviews: currentPending2nd,
+        vendorsNeedingReassessment: currentReassessments,
+        riskExceptionsExpiring: expiringSoon,
+        recentHighIncidents: currentIncidents,
+        trends: {
+          pending2ndReviews: currentPending2nd - lastWeekPending2nd,
+          reassessments: currentReassessments - lastWeekReassessments,
+          exceptions: expiringSoon,
+          incidents: currentIncidents - lastPeriodIncidents,
+        },
+      });
+    } catch (error) {
+      logger.error('Error fetching 2nd line risk overview:', error);
+      setRiskOverview({
+        pending2ndReviews: 0,
+        vendorsNeedingReassessment: 0,
+        riskExceptionsExpiring: 0,
+        recentHighIncidents: 0,
+        trends: {
+          pending2ndReviews: 0,
+          reassessments: 0,
+          exceptions: 0,
+          incidents: 0,
+        },
+      });
+    }
+  };
+
+  const fetch3rdLineAuditFocus = async () => {
+    if (!currentOrganization?.id) return;
+
+    try {
+      const [auditRes, complianceRes, attestationsRes] = await Promise.all([
+        supabase
+          .from('audit_logs')
+          .select('id', { count: 'exact', head: true })
+          .eq('organization_id', currentOrganization.id)
+          .gte('created_at', new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString()),
+        supabase
+          .from('osfi_b10_compliance_status')
+          .select('status')
+          .eq('organization_id', currentOrganization.id)
+          .is('vendor_id', null),
+        supabase
+          .from('attestations')
+          .select('id', { count: 'exact', head: true })
+          .eq('organization_id', currentOrganization.id)
+          .lte('due_date', new Date(Date.now() + 60 * 24 * 60 * 60 * 1000).toISOString())
+          .gte('due_date', new Date().toISOString()),
+      ]);
+
+      const statuses = complianceRes.data || [];
+      const compliant = statuses.filter((s) => s.status === 'compliant').length;
+      const partiallyCompliant = statuses.filter((s) => s.status === 'partially_compliant').length;
+      const total = statuses.length;
+      const score = total > 0 ? ((compliant + partiallyCompliant * 0.5) / total) * 100 : 0;
+
+      setAuditFocus({
+        recentAuditEntries: auditRes.count || 0,
+        osfiComplianceScore: Math.round(score),
+        upcomingAttestations: attestationsRes.count || 0,
+      });
+    } catch (error) {
+      logger.error('Error fetching 3rd line audit focus:', error);
+      setAuditFocus({
+        recentAuditEntries: 0,
+        osfiComplianceScore: 0,
+        upcomingAttestations: 0,
+      });
+    }
+  };
+
+  const fetchSeniorApprovals = async () => {
+    if (!currentOrganization?.id) return;
+
+    try {
+      const { data, error } = await supabase
+        .from('onboarding_requests')
+        .select(`
+          id,
+          request_number,
+          vendor_legal_name,
+          status,
+          updated_at,
+          vendor_id,
+          preliminary_risk_tier
+        `)
+        .eq('status', 'pending_senior_approval')
+        .eq('organization_id', currentOrganization.id)
+        .order('updated_at', { ascending: true })
+        .limit(10);
+
+      if (error) throw error;
+      setSeniorApprovals(data || []);
+
+      // Fetch contract values for these vendors
+      if (data && data.length > 0) {
+        const vendorIds = data.filter(r => r.vendor_id).map(r => r.vendor_id);
+
+        if (vendorIds.length > 0) {
+          const { data: vendorData } = await supabase
+            .from('vendors')
+            .select('id, annual_spend')
+            .in('id', vendorIds);
+
+          const totalContractValue = (vendorData || []).reduce((sum, v) => sum + (v.annual_spend || 0), 0);
+          const criticalCount = data.filter(r => r.preliminary_risk_tier === 'critical' || r.preliminary_risk_tier === 'high').length;
+          const averageContractValue = vendorData && vendorData.length > 0
+            ? totalContractValue / vendorData.length
+            : 0;
+
+          setSeniorApprovalMetrics({
+            totalContractValue,
+            criticalCount,
+            averageContractValue,
+          });
+        } else {
+          setSeniorApprovalMetrics({
+            totalContractValue: 0,
+            criticalCount: 0,
+            averageContractValue: 0,
+          });
+        }
+      } else {
+        setSeniorApprovalMetrics({
+          totalContractValue: 0,
+          criticalCount: 0,
+          averageContractValue: 0,
+        });
+      }
+    } catch (error) {
+      logger.error('Error fetching senior approvals:', error);
+      setSeniorApprovals([]);
+      setSeniorApprovalMetrics(null);
+    }
+  };
+
+  const fetchSystemHealth = async () => {
+    if (!currentOrganization?.id) return;
+
+    try {
+      // Fetch all pending workflows
+      const { data: pendingWorkflows, error } = await supabase
+        .from('onboarding_requests')
+        .select('id, status, submitted_at, updated_at')
+        .eq('organization_id', currentOrganization.id)
+        .in('status', ['submitted', '1b_review', '2nd_review', 'pending_senior_approval', '1b_returned', '2nd_returned']);
+
+      if (error) throw error;
+
+      const workflows = pendingWorkflows || [];
+      const now = new Date();
+
+      // Calculate oldest pending workflow
+      let oldestDays = 0;
+      if (workflows.length > 0) {
+        const oldestDate = Math.min(...workflows.map(w => new Date(w.submitted_at || w.updated_at).getTime()));
+        oldestDays = Math.floor((now.getTime() - oldestDate) / (1000 * 60 * 60 * 24));
+      }
+
+      // Find bottleneck stage (status with most items)
+      const statusCounts: Record<string, number> = {};
+      workflows.forEach(w => {
+        statusCounts[w.status] = (statusCounts[w.status] || 0) + 1;
+      });
+
+      let bottleneckStage: string | null = null;
+      let maxCount = 0;
+      Object.entries(statusCounts).forEach(([status, count]) => {
+        if (count > maxCount) {
+          maxCount = count;
+          bottleneckStage = status;
+        }
+      });
+
+      // Calculate system health score (0-100)
+      // Lower score = worse health
+      let systemScore = 100;
+      if (oldestDays > 30) systemScore -= 40;
+      else if (oldestDays > 14) systemScore -= 20;
+      else if (oldestDays > 7) systemScore -= 10;
+
+      if (workflows.length > 50) systemScore -= 30;
+      else if (workflows.length > 25) systemScore -= 15;
+      else if (workflows.length > 10) systemScore -= 5;
+
+      systemScore = Math.max(0, systemScore);
+
+      setSystemHealth({
+        pendingWorkflows: workflows.length,
+        oldestPendingDays: oldestDays,
+        bottleneckStage,
+        systemScore,
+      });
+    } catch (error) {
+      logger.error('Error fetching system health:', error);
+      setSystemHealth({
+        pendingWorkflows: 0,
+        oldestPendingDays: 0,
+        bottleneckStage: null,
+        systemScore: 100,
+      });
+    }
+  };
+
+  if (!currentOrganization) {
+    return (
+      <div className="text-center py-12">
+        <Building2 className="w-16 h-16 text-slate-300 mx-auto mb-4" />
+        <h2 className="text-xl font-semibold text-slate-900 mb-2">
+          No Organization Selected
+        </h2>
+        <p className="text-slate-600">
+          Please select or register an organization to view your dashboard
+        </p>
+      </div>
+    );
+  }
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center h-64">
+        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-slate-900"></div>
+      </div>
+    );
+  }
+
+  if (!stats) {
+    return (
+      <div className="text-center py-12">
+        <p className="text-slate-600">Unable to load dashboard data</p>
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-6">
+        <div>
+          <h1 className="text-3xl font-bold text-slate-900">Dashboard</h1>
+          <p className="text-slate-600 mt-1">
+            {currentOrganization.name} - {access.is1A ? 'My Vendor Requests' : 'Third-Party Risk Management Overview'}
+          </p>
+        </div>
+      </div>
+
+      {/* Quick Actions */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6">
+        {!access.isReadOnly && (
+          <Link
+            to="/onboarding/new"
+            className="flex items-center gap-3 px-4 py-3 bg-slate-900 text-white rounded-xl hover:bg-slate-800 transition-colors"
+          >
+            <Upload className="w-5 h-5" />
+            <span className="text-sm font-medium">New Onboarding</span>
+          </Link>
+        )}
+        {stats && stats.pendingApprovals > 0 && (
+          <Link
+            to="/onboarding"
+            className="flex items-center gap-3 px-4 py-3 bg-amber-50 border border-amber-200 text-amber-800 rounded-xl hover:bg-amber-100 transition-colors"
+          >
+            <Clock className="w-5 h-5" />
+            <span className="text-sm font-medium">{stats.pendingApprovals} Pending Reviews</span>
+          </Link>
+        )}
+        {access.canSeeRiskAssessment && (
+          <Link
+            to="/assessments"
+            className="flex items-center gap-3 px-4 py-3 bg-white border border-slate-200 text-slate-700 rounded-xl hover:bg-slate-50 transition-colors"
+          >
+            <Shield className="w-5 h-5" />
+            <span className="text-sm font-medium">Assessments</span>
+          </Link>
+        )}
+        {access.canSeeBoardReports && (
+          <Link
+            to="/reports/board"
+            className="flex items-center gap-3 px-4 py-3 bg-white border border-slate-200 text-slate-700 rounded-xl hover:bg-slate-50 transition-colors"
+          >
+            <FileText className="w-5 h-5" />
+            <span className="text-sm font-medium">Board Reports</span>
+          </Link>
+        )}
+      </div>
+
+      {/* Role-Specific Sections */}
+      {defenseLine && (
+        <div className="mb-6">
+          {/* 1a - Business Requestor */}
+          {(defenseLine === '1a' || defenseLine === 'admin') && (
+            <div className="bg-white rounded-lg shadow mb-6">
+              <div className="p-4 border-b border-slate-200">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <div className="p-2 bg-blue-100 rounded-lg">
+                      <Briefcase className="w-5 h-5 text-blue-600" />
+                    </div>
+                    <div>
+                      <h2 className="text-lg font-semibold text-slate-900">
+                        My Active Requests
+                        {myActiveRequests.length > 0 && (
+                          <span className="ml-2 px-2 py-0.5 text-xs font-medium bg-blue-100 text-blue-700 rounded-full">
+                            {myActiveRequests.length}
+                          </span>
+                        )}
+                      </h2>
+                      <p className="text-sm text-slate-600">Track your onboarding submissions</p>
+                    </div>
+                  </div>
+                  <Link
+                    to="/onboarding"
+                    className="px-4 py-2 text-slate-700 hover:bg-slate-100 rounded-lg flex items-center text-sm"
+                  >
+                    View All <ArrowRight className="w-4 h-4 ml-2" />
+                  </Link>
+                </div>
+              </div>
+              <div className="p-4">
+                {roleDataLoading ? (
+                  <div className="flex items-center justify-center py-8">
+                    <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
+                  </div>
+                ) : myActiveRequests.length > 0 ? (
+                  <div className="space-y-2">
+                    {myActiveRequests.map((request) => (
+                      <Link
+                        key={request.id}
+                        to={`/onboarding/${request.id}`}
+                        className="flex items-center justify-between p-3 border border-slate-200 rounded-lg hover:bg-slate-50 transition-colors"
+                      >
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-3">
+                            <span className="font-medium text-sm text-slate-900">{request.request_number}</span>
+                            <span className="text-sm text-slate-600 truncate">{request.vendor_legal_name}</span>
+                          </div>
+                          <p className="text-xs text-slate-500 mt-1">Last updated: {formatDate(request.updated_at)}</p>
+                        </div>
+                        <div className="flex items-center gap-2 ml-4 flex-shrink-0">
+                          <span className={`px-2 py-1 rounded text-xs font-medium ${ONBOARDING_STATUS_COLORS[request.status as keyof typeof ONBOARDING_STATUS_COLORS]}`}>
+                            {ONBOARDING_STATUS_LABELS[request.status as keyof typeof ONBOARDING_STATUS_LABELS]}
+                          </span>
+                          {request.status === 'draft' && (
+                            <span className="text-xs text-blue-600 font-medium">Continue</span>
+                          )}
+                        </div>
+                      </Link>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="text-center py-8">
+                    <Briefcase className="w-12 h-12 mx-auto mb-3 text-slate-300" />
+                    <p className="text-slate-600 mb-3">No active requests</p>
+                    <Link
+                      to="/onboarding/new"
+                      className="inline-flex items-center px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-sm"
+                    >
+                      Create New Request
+                    </Link>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* 1b - Coordinator Review Queue */}
+          {(defenseLine === '1b' || defenseLine === 'admin') && (
+            <div className="bg-white rounded-lg shadow mb-6">
+              <div className="p-4 border-b border-slate-200">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <div className="p-2 bg-indigo-100 rounded-lg">
+                      <FileText className="w-5 h-5 text-indigo-600" />
+                    </div>
+                    <div className="flex-1">
+                      <h2 className="text-lg font-semibold text-slate-900">
+                        Pending My Review
+                        {reviewQueue.length > 0 && (
+                          <span className="ml-2 px-2 py-0.5 text-xs font-medium bg-indigo-100 text-indigo-700 rounded-full">
+                            {reviewQueue.length}
+                          </span>
+                        )}
+                      </h2>
+                      <div className="flex items-center gap-4 text-sm text-slate-600 mt-1">
+                        <span>Requests awaiting your 1st line review</span>
+                        {reviewQueueMetrics && reviewQueueMetrics.totalInQueue > 0 && (
+                          <>
+                            <span className="text-slate-400">•</span>
+                            <span className={`flex items-center gap-1 ${reviewQueueMetrics.averageWaitTime > 5 ? 'text-amber-600 font-medium' : ''}`}>
+                              <Clock className="w-3.5 h-3.5" />
+                              Avg wait: {reviewQueueMetrics.averageWaitTime} days
+                            </span>
+                          </>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                  <Link
+                    to="/onboarding"
+                    className="px-4 py-2 text-slate-700 hover:bg-slate-100 rounded-lg flex items-center text-sm"
+                  >
+                    View All <ArrowRight className="w-4 h-4 ml-2" />
+                  </Link>
+                </div>
+              </div>
+              <div className="p-4">
+                {roleDataLoading ? (
+                  <div className="flex items-center justify-center py-8">
+                    <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-indigo-600"></div>
+                  </div>
+                ) : reviewQueue.length > 0 ? (
+                  <div className="space-y-2">
+                    {reviewQueue.map((item) => (
+                      <Link
+                        key={item.id}
+                        to={`/onboarding/${item.id}`}
+                        className={`flex items-center justify-between p-3 border rounded-lg hover:bg-slate-50 transition-colors ${
+                          item.daysWaiting > 5 ? 'border-red-200 bg-red-50' : 'border-slate-200'
+                        }`}
+                      >
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-3">
+                            <span className="font-medium text-sm text-slate-900">{item.request_number}</span>
+                            <span className="text-sm text-slate-600 truncate">{item.vendor_legal_name}</span>
+                          </div>
+                          <div className="flex items-center gap-2 mt-1">
+                            {item.preliminary_risk_tier && (
+                              <span className={`px-1.5 py-0.5 rounded text-xs font-medium ${
+                                item.preliminary_risk_tier === 'critical' ? 'bg-red-100 text-red-800' :
+                                item.preliminary_risk_tier === 'high' ? 'bg-orange-100 text-orange-800' :
+                                item.preliminary_risk_tier === 'medium' ? 'bg-amber-100 text-amber-800' :
+                                'bg-green-100 text-green-800'
+                              }`}>
+                                {item.preliminary_risk_tier}
+                              </span>
+                            )}
+                            <span className={`text-xs ${item.daysWaiting > 5 ? 'text-red-600 font-medium' : 'text-slate-500'}`}>
+                              Waiting {item.daysWaiting} {item.daysWaiting === 1 ? 'day' : 'days'}
+                            </span>
+                          </div>
+                        </div>
+                        <span className="ml-4 px-3 py-1.5 bg-indigo-600 text-white text-xs font-medium rounded hover:bg-indigo-700 flex-shrink-0">
+                          Review Now
+                        </span>
+                      </Link>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="text-center py-8">
+                    <CheckCircle className="w-12 h-12 mx-auto mb-3 text-green-500" />
+                    <p className="text-slate-600 font-medium">All caught up!</p>
+                    <p className="text-sm text-slate-500 mt-1">No requests pending your review</p>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* 2nd - Risk Management Overview */}
+          {(defenseLine === '2nd' || defenseLine === 'admin') && riskOverview && (
+            <div className="bg-white rounded-lg shadow mb-6">
+              <div className="p-4 border-b border-slate-200">
+                <div className="flex items-center gap-3">
+                  <div className="p-2 bg-red-100 rounded-lg">
+                    <ShieldAlert className="w-5 h-5 text-red-600" />
+                  </div>
+                  <div>
+                    <h2 className="text-lg font-semibold text-slate-900">Risk Oversight</h2>
+                    <p className="text-sm text-slate-600">2nd line risk management focus areas</p>
+                  </div>
+                </div>
+              </div>
+              <div className="p-4">
+                {roleDataLoading ? (
+                  <div className="flex items-center justify-center py-8">
+                    <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-red-600"></div>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-4 gap-4">
+                    <Link
+                      to="/onboarding?status=2nd_review"
+                      className="p-4 border border-slate-200 rounded-lg hover:bg-slate-50 transition-colors"
+                    >
+                      <div className="flex items-center justify-between mb-2">
+                        <FileText className="w-5 h-5 text-cyan-600" />
+                        {riskOverview.pending2ndReviews > 0 && (
+                          <span className="px-2 py-0.5 bg-cyan-100 text-cyan-700 text-xs font-medium rounded-full">
+                            {riskOverview.pending2ndReviews}
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-2xl font-bold text-slate-900">{riskOverview.pending2ndReviews}</p>
+                      <div className="flex items-center justify-between mt-1">
+                        <p className="text-xs text-slate-600">Pending 2nd Line Review</p>
+                        {riskOverview.trends.pending2ndReviews !== 0 && (
+                          <span className={`flex items-center text-xs font-medium ${riskOverview.trends.pending2ndReviews > 0 ? 'text-red-600' : 'text-green-600'}`}>
+                            {riskOverview.trends.pending2ndReviews > 0 ? (
+                              <TrendingUp className="w-3 h-3" />
+                            ) : (
+                              <TrendingDown className="w-3 h-3" />
+                            )}
+                          </span>
+                        )}
+                      </div>
+                    </Link>
+                    <Link
+                      to="/assessments/reassessments"
+                      className="p-4 border border-slate-200 rounded-lg hover:bg-slate-50 transition-colors"
+                    >
+                      <div className="flex items-center justify-between mb-2">
+                        <RefreshCw className="w-5 h-5 text-amber-600" />
+                        {riskOverview.vendorsNeedingReassessment > 0 && (
+                          <span className="px-2 py-0.5 bg-amber-100 text-amber-700 text-xs font-medium rounded-full">
+                            {riskOverview.vendorsNeedingReassessment}
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-2xl font-bold text-slate-900">{riskOverview.vendorsNeedingReassessment}</p>
+                      <div className="flex items-center justify-between mt-1">
+                        <p className="text-xs text-slate-600">Reassessments Needed</p>
+                        {riskOverview.trends.reassessments !== 0 && (
+                          <span className={`flex items-center text-xs font-medium ${riskOverview.trends.reassessments > 0 ? 'text-red-600' : 'text-green-600'}`}>
+                            {riskOverview.trends.reassessments > 0 ? (
+                              <TrendingUp className="w-3 h-3" />
+                            ) : (
+                              <TrendingDown className="w-3 h-3" />
+                            )}
+                          </span>
+                        )}
+                      </div>
+                    </Link>
+                    <Link
+                      to="/risk-exceptions"
+                      className="p-4 border border-slate-200 rounded-lg hover:bg-slate-50 transition-colors"
+                    >
+                      <div className="flex items-center justify-between mb-2">
+                        <ShieldAlert className="w-5 h-5 text-orange-600" />
+                        {riskOverview.riskExceptionsExpiring > 0 && (
+                          <span className="px-2 py-0.5 bg-orange-100 text-orange-700 text-xs font-medium rounded-full">
+                            {riskOverview.riskExceptionsExpiring}
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-2xl font-bold text-slate-900">{riskOverview.riskExceptionsExpiring}</p>
+                      <p className="text-xs text-slate-600 mt-1">Exceptions Expiring Soon</p>
+                    </Link>
+                    <Link
+                      to="/incidents"
+                      className="p-4 border border-slate-200 rounded-lg hover:bg-slate-50 transition-colors"
+                    >
+                      <div className="flex items-center justify-between mb-2">
+                        <AlertTriangle className="w-5 h-5 text-red-600" />
+                        {riskOverview.recentHighIncidents > 0 && (
+                          <span className="px-2 py-0.5 bg-red-100 text-red-700 text-xs font-medium rounded-full">
+                            {riskOverview.recentHighIncidents}
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-2xl font-bold text-slate-900">{riskOverview.recentHighIncidents}</p>
+                      <div className="flex items-center justify-between mt-1">
+                        <p className="text-xs text-slate-600">High/Critical Incidents</p>
+                        {riskOverview.trends.incidents !== 0 && (
+                          <span className={`flex items-center text-xs font-medium ${riskOverview.trends.incidents > 0 ? 'text-red-600' : 'text-green-600'}`}>
+                            {riskOverview.trends.incidents > 0 ? (
+                              <TrendingUp className="w-3 h-3" />
+                            ) : (
+                              <TrendingDown className="w-3 h-3" />
+                            )}
+                          </span>
+                        )}
+                      </div>
+                    </Link>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* 3rd - Audit Focus */}
+          {(defenseLine === '3rd' || defenseLine === 'admin') && auditFocus && (
+            <div className="bg-white rounded-lg shadow mb-6">
+              <div className="p-4 border-b border-slate-200">
+                <div className="flex items-center gap-3">
+                  <div className="p-2 bg-slate-100 rounded-lg">
+                    <Eye className="w-5 h-5 text-slate-600" />
+                  </div>
+                  <div>
+                    <h2 className="text-lg font-semibold text-slate-900">Audit Focus</h2>
+                    <p className="text-sm text-slate-600">3rd line audit and compliance monitoring</p>
+                  </div>
+                </div>
+              </div>
+              <div className="p-4">
+                {roleDataLoading ? (
+                  <div className="flex items-center justify-center py-8">
+                    <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-slate-600"></div>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-3 gap-4">
+                    <Link
+                      to="/audit-log"
+                      className="p-4 border border-slate-200 rounded-lg hover:bg-slate-50 transition-colors"
+                    >
+                      <FileCheck className="w-5 h-5 text-slate-600 mb-2" />
+                      <p className="text-2xl font-bold text-slate-900">{auditFocus.recentAuditEntries}</p>
+                      <p className="text-xs text-slate-600 mt-1">Audit Entries (7 days)</p>
+                    </Link>
+                    <Link
+                      to="/compliance/osfi-b10"
+                      className="p-4 border border-slate-200 rounded-lg hover:bg-slate-50 transition-colors"
+                    >
+                      <Shield className="w-5 h-5 text-slate-600 mb-2" />
+                      <div className="flex items-baseline gap-1">
+                        <p className="text-2xl font-bold text-slate-900">{auditFocus.osfiComplianceScore}%</p>
+                        <span className={`text-xs font-medium ${
+                          auditFocus.osfiComplianceScore >= 80 ? 'text-green-600' :
+                          auditFocus.osfiComplianceScore >= 60 ? 'text-amber-600' :
+                          'text-red-600'
+                        }`}>
+                          {auditFocus.osfiComplianceScore >= 80 ? 'Good' :
+                           auditFocus.osfiComplianceScore >= 60 ? 'Fair' : 'Poor'}
+                        </span>
+                      </div>
+                      <p className="text-xs text-slate-600 mt-1">OSFI B-10 Compliance</p>
+                    </Link>
+                    <Link
+                      to="/attestations"
+                      className="p-4 border border-slate-200 rounded-lg hover:bg-slate-50 transition-colors"
+                    >
+                      <Calendar className="w-5 h-5 text-slate-600 mb-2" />
+                      <p className="text-2xl font-bold text-slate-900">{auditFocus.upcomingAttestations}</p>
+                      <p className="text-xs text-slate-600 mt-1">Attestations Due (60 days)</p>
+                    </Link>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Senior Management - Approvals Required */}
+          {(defenseLine === 'senior_management' || defenseLine === 'admin') && (
+            <div className="bg-white rounded-lg shadow mb-6">
+              <div className="p-4 border-b border-slate-200">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <div className="p-2 bg-rose-100 rounded-lg">
+                      <Users className="w-5 h-5 text-rose-600" />
+                    </div>
+                    <div className="flex-1">
+                      <h2 className="text-lg font-semibold text-slate-900">
+                        Pending Your Approval
+                        {seniorApprovals.length > 0 && (
+                          <span className="ml-2 px-2 py-0.5 text-xs font-medium bg-rose-100 text-rose-700 rounded-full">
+                            {seniorApprovals.length}
+                          </span>
+                        )}
+                      </h2>
+                      <div className="flex items-center gap-4 text-sm text-slate-600 mt-1">
+                        <span>High-value or critical vendor approvals</span>
+                        {seniorApprovalMetrics && seniorApprovalMetrics.totalContractValue > 0 && (
+                          <>
+                            <span className="text-slate-400">•</span>
+                            <span className="flex items-center gap-1 text-emerald-600 font-medium">
+                              <DollarSign className="w-3.5 h-3.5" />
+                              {(seniorApprovalMetrics.totalContractValue / 1000000).toFixed(1)}M total value
+                            </span>
+                            {seniorApprovalMetrics.criticalCount > 0 && (
+                              <>
+                                <span className="text-slate-400">•</span>
+                                <span className="flex items-center gap-1 text-red-600 font-medium">
+                                  <AlertTriangle className="w-3.5 h-3.5" />
+                                  {seniorApprovalMetrics.criticalCount} critical
+                                </span>
+                              </>
+                            )}
+                          </>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                  <Link
+                    to="/onboarding?status=pending_senior_approval"
+                    className="px-4 py-2 text-slate-700 hover:bg-slate-100 rounded-lg flex items-center text-sm"
+                  >
+                    View All <ArrowRight className="w-4 h-4 ml-2" />
+                  </Link>
+                </div>
+              </div>
+              <div className="p-4">
+                {roleDataLoading ? (
+                  <div className="flex items-center justify-center py-8">
+                    <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-rose-600"></div>
+                  </div>
+                ) : seniorApprovals.length > 0 ? (
+                  <div className="space-y-2">
+                    {seniorApprovals.map((request) => (
+                      <Link
+                        key={request.id}
+                        to={`/onboarding/${request.id}`}
+                        className="flex items-center justify-between p-3 border border-rose-200 bg-rose-50 rounded-lg hover:bg-rose-100 transition-colors"
+                      >
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-3">
+                            <span className="font-medium text-sm text-slate-900">{request.request_number}</span>
+                            <span className="text-sm text-slate-600 truncate">{request.vendor_legal_name}</span>
+                          </div>
+                          <p className="text-xs text-slate-500 mt-1">Awaiting decision</p>
+                        </div>
+                        <span className="ml-4 px-3 py-1.5 bg-rose-600 text-white text-xs font-medium rounded hover:bg-rose-700 flex-shrink-0">
+                          Review & Approve
+                        </span>
+                      </Link>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="text-center py-8">
+                    <CheckCircle className="w-12 h-12 mx-auto mb-3 text-green-500" />
+                    <p className="text-slate-600 font-medium">No approvals pending</p>
+                    <p className="text-sm text-slate-500 mt-1">All requests have been processed</p>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Admin - System Health */}
+          {defenseLine === 'admin' && systemHealth && (
+            <div className="bg-white rounded-lg shadow mb-6">
+              <div className="p-4 border-b border-slate-200">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <div className={`p-2 rounded-lg ${
+                      systemHealth.systemScore >= 80 ? 'bg-green-100' :
+                      systemHealth.systemScore >= 60 ? 'bg-amber-100' :
+                      'bg-red-100'
+                    }`}>
+                      <Activity className={`w-5 h-5 ${
+                        systemHealth.systemScore >= 80 ? 'text-green-600' :
+                        systemHealth.systemScore >= 60 ? 'text-amber-600' :
+                        'text-red-600'
+                      }`} />
+                    </div>
+                    <div>
+                      <h2 className="text-lg font-semibold text-slate-900">
+                        System Health
+                        <span className={`ml-2 px-2 py-0.5 text-xs font-medium rounded-full ${
+                          systemHealth.systemScore >= 80 ? 'bg-green-100 text-green-700' :
+                          systemHealth.systemScore >= 60 ? 'bg-amber-100 text-amber-700' :
+                          'bg-red-100 text-red-700'
+                        }`}>
+                          {systemHealth.systemScore}%
+                        </span>
+                      </h2>
+                      <p className="text-sm text-slate-600">Workflow performance and system bottlenecks</p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div className="p-4">
+                {roleDataLoading ? (
+                  <div className="flex items-center justify-center py-8">
+                    <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-slate-600"></div>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-3 gap-4">
+                    <div className="p-4 border border-slate-200 rounded-lg">
+                      <div className="flex items-center justify-between mb-2">
+                        <Clock className="w-5 h-5 text-slate-600" />
+                        {systemHealth.pendingWorkflows > 10 && (
+                          <span className="px-2 py-0.5 bg-amber-100 text-amber-700 text-xs font-medium rounded-full">
+                            {systemHealth.pendingWorkflows}
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-2xl font-bold text-slate-900">{systemHealth.pendingWorkflows}</p>
+                      <p className="text-xs text-slate-600 mt-1">Pending Workflows</p>
+                    </div>
+                    <div className={`p-4 border rounded-lg ${
+                      systemHealth.oldestPendingDays > 14 ? 'border-red-200 bg-red-50' :
+                      systemHealth.oldestPendingDays > 7 ? 'border-amber-200 bg-amber-50' :
+                      'border-slate-200'
+                    }`}>
+                      <AlertTriangle className={`w-5 h-5 mb-2 ${
+                        systemHealth.oldestPendingDays > 14 ? 'text-red-600' :
+                        systemHealth.oldestPendingDays > 7 ? 'text-amber-600' :
+                        'text-slate-600'
+                      }`} />
+                      <p className={`text-2xl font-bold ${
+                        systemHealth.oldestPendingDays > 14 ? 'text-red-600' :
+                        systemHealth.oldestPendingDays > 7 ? 'text-amber-600' :
+                        'text-slate-900'
+                      }`}>{systemHealth.oldestPendingDays}</p>
+                      <p className="text-xs text-slate-600 mt-1">Days (Oldest Pending)</p>
+                    </div>
+                    <div className="p-4 border border-slate-200 rounded-lg">
+                      <Shield className="w-5 h-5 text-slate-600 mb-2" />
+                      {systemHealth.bottleneckStage ? (
+                        <>
+                          <p className="text-sm font-bold text-slate-900">
+                            {ONBOARDING_STATUS_LABELS[systemHealth.bottleneckStage as keyof typeof ONBOARDING_STATUS_LABELS] || systemHealth.bottleneckStage}
+                          </p>
+                          <p className="text-xs text-slate-600 mt-1">Current Bottleneck</p>
+                        </>
+                      ) : (
+                        <>
+                          <p className="text-sm font-bold text-green-600">None</p>
+                          <p className="text-xs text-slate-600 mt-1">No Bottleneck Detected</p>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {!access.is1A && (
+        <div className="grid grid-cols-4 gap-4 mb-6">
+          <div className="bg-white rounded-lg shadow p-6">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-slate-600 text-sm">Total Third Parties</span>
+              <Building2 className="w-5 h-5 text-slate-400" />
+            </div>
+            <p className="text-3xl font-bold text-slate-900">{stats.totalVendors}</p>
+            <Link to="/vendors" className="text-sm text-slate-600 hover:text-slate-900 flex items-center mt-2">
+              View all <ArrowRight className="w-3 h-3 ml-1" />
+            </Link>
+          </div>
+
+          <div className="bg-white rounded-lg shadow p-6">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-slate-600 text-sm">Critical Vendors</span>
+              <AlertTriangle className="w-5 h-5 text-red-500" />
+            </div>
+            <p className="text-3xl font-bold text-red-600">{stats.criticalVendors}</p>
+            <p className="text-sm text-slate-600 mt-2">
+              {stats.totalVendors > 0
+                ? `${Math.round((stats.criticalVendors / stats.totalVendors) * 100)}% of total`
+                : 'No vendors'}
+            </p>
+          </div>
+
+          <div className="bg-white rounded-lg shadow p-6">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-slate-600 text-sm">Pending Approvals</span>
+              <FileText className="w-5 h-5 text-amber-500" />
+            </div>
+            <p className="text-3xl font-bold text-amber-600">{stats.pendingApprovals}</p>
+            <Link to="/vendors?status=pending_approval" className="text-sm text-slate-600 hover:text-slate-900 flex items-center mt-2">
+              Review <ArrowRight className="w-3 h-3 ml-1" />
+            </Link>
+          </div>
+
+          <div className="bg-white rounded-lg shadow p-6">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-slate-600 text-sm">Upcoming Reviews</span>
+              <Calendar className="w-5 h-5 text-slate-400" />
+            </div>
+            <p className="text-3xl font-bold text-slate-900">{stats.upcomingReviews}</p>
+            <p className="text-sm text-slate-600 mt-2">Next 30 days</p>
+          </div>
+        </div>
+      )}
+
+      {!access.is1A && exceptionStats && (exceptionStats.active > 0 || exceptionStats.pending > 0) && (
+        <div className="bg-white rounded-lg shadow p-4 mb-6">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-4">
+              <div className="p-2 bg-amber-100 rounded-lg">
+                <ShieldAlert className="w-5 h-5 text-amber-600" />
+              </div>
+              <div>
+                <h3 className="font-medium text-slate-900">Risk Exceptions</h3>
+                <div className="flex items-center gap-4 text-sm mt-1">
+                  <span className="text-emerald-600">
+                    {exceptionStats.active} active
+                  </span>
+                  {exceptionStats.pending > 0 && (
+                    <span className="text-amber-600">
+                      {exceptionStats.pending} pending approval
+                    </span>
+                  )}
+                  {exceptionStats.expiringSoon > 0 && (
+                    <span className="text-orange-600">
+                      {exceptionStats.expiringSoon} expiring soon
+                    </span>
+                  )}
+                </div>
+              </div>
+            </div>
+            <Link
+              to="/risk-exceptions"
+              className="px-4 py-2 text-slate-700 hover:bg-slate-100 rounded-lg flex items-center"
+            >
+              Manage Exceptions <ArrowRight className="w-4 h-4 ml-2" />
+            </Link>
+          </div>
+        </div>
+      )}
+
+      {!access.is1A && pendingDocuments.length > 0 && (
+        <div className="bg-white rounded-lg shadow mb-6">
+          <div className="p-4 border-b border-slate-200">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="p-2 bg-blue-100 rounded-lg">
+                  <FileCheck className="w-5 h-5 text-blue-600" />
+                </div>
+                <div>
+                  <h3 className="font-medium text-slate-900">Pending Due Diligence Documents</h3>
+                  <div className="flex items-center gap-4 text-sm mt-1">
+                    <span className="text-blue-600">{pendingDocuments.length} pending</span>
+                    {pendingDocuments.filter((d) => d.urgency === 'overdue').length > 0 && (
+                      <span className="text-red-600">
+                        {pendingDocuments.filter((d) => d.urgency === 'overdue').length} overdue
+                      </span>
+                    )}
+                    {pendingDocuments.filter((d) => d.blocks_activation).length > 0 && (
+                      <span className="text-amber-600 flex items-center gap-1">
+                        <Lock className="w-3 h-3" />
+                        {pendingDocuments.filter((d) => d.blocks_activation).length} blocking
+                      </span>
+                    )}
+                  </div>
+                </div>
+              </div>
+              <Link
+                to="/due-diligence"
+                className="px-4 py-2 text-slate-700 hover:bg-slate-100 rounded-lg flex items-center text-sm"
+              >
+                View All <ArrowRight className="w-4 h-4 ml-2" />
+              </Link>
+            </div>
+          </div>
+          <div className="p-4">
+            <div className="space-y-2">
+              {pendingDocuments.slice(0, 5).map((doc) => (
+                <div
+                  key={doc.id}
+                  className={`flex items-center justify-between p-3 rounded-lg border ${
+                    doc.urgency === 'overdue'
+                      ? 'bg-red-50 border-red-200'
+                      : doc.blocks_activation
+                        ? 'bg-amber-50 border-amber-200'
+                        : 'bg-slate-50 border-slate-200'
+                  }`}
+                >
+                  <div className="flex items-center gap-3 min-w-0">
+                    {doc.urgency === 'overdue' ? (
+                      <AlertTriangle className="w-4 h-4 text-red-500 flex-shrink-0" />
+                    ) : doc.blocks_activation ? (
+                      <Lock className="w-4 h-4 text-amber-500 flex-shrink-0" />
+                    ) : (
+                      <FileText className="w-4 h-4 text-slate-400 flex-shrink-0" />
+                    )}
+                    <div className="min-w-0">
+                      <p className="font-medium text-sm text-slate-900 truncate">{doc.document_type_name}</p>
+                      {doc.vendor_name && (
+                        <p className="text-xs text-slate-500 truncate">{doc.vendor_name}</p>
+                      )}
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2 flex-shrink-0 ml-4">
+                    {doc.blocks_activation && (
+                      <span className="px-1.5 py-0.5 bg-amber-100 text-amber-700 text-xs font-medium rounded">
+                        Blocking
+                      </span>
+                    )}
+                    <span
+                      className={`text-xs font-medium ${
+                        doc.urgency === 'overdue'
+                          ? 'text-red-600'
+                          : doc.urgency === 'critical'
+                            ? 'text-red-500'
+                            : doc.urgency === 'soon'
+                              ? 'text-amber-500'
+                              : 'text-slate-500'
+                      }`}
+                    >
+                      {doc.urgency === 'overdue'
+                        ? `${doc.days_overdue} days overdue`
+                        : `Due ${formatDate(doc.due_date)}`}
+                    </span>
+                  </div>
+                </div>
+              ))}
+            </div>
+            {pendingDocuments.length > 5 && (
+              <Link
+                to="/due-diligence"
+                className="mt-3 block text-center text-sm text-blue-600 hover:text-blue-800"
+              >
+                View all {pendingDocuments.length} pending documents
+              </Link>
+            )}
+          </div>
+        </div>
+      )}
+
+      {!access.is1A && (
+      <div className="grid grid-cols-2 gap-6 mb-6">
+        <div className="bg-white rounded-lg shadow p-6">
+          <h2 className="text-lg font-semibold text-slate-900 mb-4">Tier Distribution</h2>
+          {stats.tierDistribution.length > 0 ? (
+            <ResponsiveContainer width="100%" height={300}>
+              <PieChart>
+                <Pie
+                  data={stats.tierDistribution}
+                  cx="50%"
+                  cy="50%"
+                  labelLine={false}
+                  label={({ name, percent }) => `${name}: ${(percent * 100).toFixed(0)}%`}
+                  outerRadius={80}
+                  fill="#8884d8"
+                  dataKey="value"
+                >
+                  {stats.tierDistribution.map((entry, index) => (
+                    <Cell key={`cell-${index}`} fill={entry.color} />
+                  ))}
+                </Pie>
+                <Tooltip />
+              </PieChart>
+            </ResponsiveContainer>
+          ) : (
+            <div className="text-center py-12 text-slate-500">No tiered vendors yet</div>
+          )}
+        </div>
+
+        <div className="bg-white rounded-lg shadow p-6">
+          <h2 className="text-lg font-semibold text-slate-900 mb-4">Risk Rating Distribution</h2>
+          {stats.riskDistribution.some((d) => d.count > 0) ? (
+            <ResponsiveContainer width="100%" height={300}>
+              <BarChart data={stats.riskDistribution}>
+                <XAxis dataKey="range" angle={-45} textAnchor="end" height={80} />
+                <YAxis />
+                <Tooltip />
+                <Bar dataKey="count" fill="#0f172a" radius={[8, 8, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          ) : (
+            <div className="text-center py-12 text-slate-500">No risk assessments yet</div>
+          )}
+        </div>
+      </div>
+      )}
+
+      {!access.is1A && (
+      <div className="grid grid-cols-3 gap-6">
+        <div className="col-span-2 bg-white rounded-lg shadow">
+          <div className="p-6 border-b border-slate-200">
+            <div className="flex items-center justify-between">
+              <h2 className="text-lg font-semibold text-slate-900 flex items-center">
+                <Shield className="w-5 h-5 mr-2 text-red-500" />
+                Critical Third Parties
+              </h2>
+              <Link to="/vendors?tier=tier_5_critical" className="text-sm text-slate-600 hover:text-slate-900">
+                View all
+              </Link>
+            </div>
+          </div>
+          <div className="p-6">
+            {criticalVendors.length > 0 ? (
+              <div className="space-y-3">
+                {criticalVendors.map((vendor) => (
+                  <Link
+                    key={vendor.id}
+                    to={`/vendors/${vendor.id}`}
+                    className="block p-4 border border-slate-200 rounded-lg hover:bg-slate-50 transition-colors"
+                  >
+                    <div className="flex items-start justify-between">
+                      <div className="flex-1">
+                        <h3 className="font-medium text-slate-900">{vendor.legal_name}</h3>
+                        <p className="text-sm text-slate-600 mt-1">{vendor.service_category}</p>
+                      </div>
+                      {vendor.risk_rating && (
+                        <span className="ml-4 px-2 py-1 bg-red-100 text-red-800 text-xs font-medium rounded">
+                          Risk: {vendor.risk_rating.toFixed(1)}
+                        </span>
+                      )}
+                    </div>
+                  </Link>
+                ))}
+              </div>
+            ) : (
+              <div className="text-center py-8 text-slate-500">
+                <Shield className="w-12 h-12 mx-auto mb-2 text-slate-300" />
+                <p>No critical vendors</p>
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div className="space-y-6">
+          {reassessmentsDue.length > 0 && (
+            <div className="bg-white rounded-lg shadow">
+              <div className="p-4 border-b border-slate-200">
+                <div className="flex items-center justify-between">
+                  <h2 className="text-base font-semibold text-slate-900 flex items-center">
+                    <RefreshCw className="w-4 h-4 mr-2 text-amber-600" />
+                    Reassessments Due
+                    <span className="ml-2 px-2 py-0.5 text-xs font-medium bg-amber-100 text-amber-700 rounded-full">
+                      {reassessmentsDue.length}
+                    </span>
+                  </h2>
+                  <Link to="/assessments/reassessments" className="text-xs text-slate-600 hover:text-slate-900">
+                    View all
+                  </Link>
+                </div>
+              </div>
+              <div className="p-4">
+                {(() => {
+                  const overdue = reassessmentsDue.filter((r) => r.isOverdue);
+                  const upcoming = reassessmentsDue.filter((r) => !r.isOverdue);
+                  return (
+                    <div className="space-y-3">
+                      {overdue.length > 0 && (
+                        <div>
+                          <p className="text-xs font-medium text-red-600 mb-2 flex items-center">
+                            <AlertTriangle className="w-3 h-3 mr-1" />
+                            Overdue ({overdue.length})
+                          </p>
+                          <div className="space-y-2">
+                            {overdue.slice(0, 2).map((vendor) => (
+                              <Link
+                                key={vendor.id}
+                                to={`/vendors/${vendor.id}/assess?type=periodic_review`}
+                                className="block p-2 border border-red-200 bg-red-50 rounded-lg hover:bg-red-100 transition-colors"
+                              >
+                                <div className="flex items-center justify-between">
+                                  <h3 className="font-medium text-sm text-slate-900 truncate pr-2">{vendor.legal_name}</h3>
+                                  <span className="text-xs text-red-600 font-medium whitespace-nowrap">
+                                    {Math.abs(vendor.daysUntilDue)} days overdue
+                                  </span>
+                                </div>
+                              </Link>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                      {upcoming.length > 0 && (
+                        <div>
+                          <p className="text-xs font-medium text-amber-600 mb-2 flex items-center">
+                            <Calendar className="w-3 h-3 mr-1" />
+                            Upcoming ({upcoming.length})
+                          </p>
+                          <div className="space-y-2">
+                            {upcoming.slice(0, 2).map((vendor) => (
+                              <Link
+                                key={vendor.id}
+                                to={`/vendors/${vendor.id}/assess?type=periodic_review`}
+                                className="block p-2 border border-slate-200 rounded-lg hover:bg-slate-50 transition-colors"
+                              >
+                                <div className="flex items-center justify-between">
+                                  <h3 className="font-medium text-sm text-slate-900 truncate pr-2">{vendor.legal_name}</h3>
+                                  <span className="text-xs text-slate-600 whitespace-nowrap">
+                                    Due in {vendor.daysUntilDue} days
+                                  </span>
+                                </div>
+                              </Link>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
+                {reassessmentsDue.length > 4 && (
+                  <Link
+                    to="/assessments/reassessments"
+                    className="mt-3 block text-center text-xs text-amber-600 hover:text-amber-800"
+                  >
+                    View all {reassessmentsDue.length} reassessments
+                  </Link>
+                )}
+              </div>
+            </div>
+          )}
+
+          <div className="bg-white rounded-lg shadow">
+            <div className="p-4 border-b border-slate-200">
+              <div className="flex items-center justify-between">
+                <h2 className="text-base font-semibold text-slate-900 flex items-center">
+                  <Clock className="w-4 h-4 mr-2 text-slate-600" />
+                  Upcoming Reviews
+                </h2>
+                <Link to="/vendors" className="text-xs text-slate-600 hover:text-slate-900">
+                  View all
+                </Link>
+              </div>
+            </div>
+            <div className="p-4">
+              {upcomingReviews.length > 0 ? (
+                <div className="space-y-2">
+                  {upcomingReviews.slice(0, 3).map((vendor) => (
+                    <Link
+                      key={vendor.id}
+                      to={`/vendors/${vendor.id}`}
+                      className="block p-3 border border-slate-200 rounded-lg hover:bg-slate-50 transition-colors"
+                    >
+                      <div className="space-y-1">
+                        <h3 className="font-medium text-sm text-slate-900">{vendor.legal_name}</h3>
+                        <div className="flex items-center justify-between text-xs">
+                          <span className="text-slate-600">
+                            {vendor.tier && tierConfig[vendor.tier]?.label}
+                          </span>
+                          {vendor.next_review_date && (
+                            <span className="text-slate-600">
+                              {formatDate(vendor.next_review_date)}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    </Link>
+                  ))}
+                </div>
+              ) : (
+                <div className="text-center py-6 text-slate-500">
+                  <Calendar className="w-8 h-8 mx-auto mb-2 text-slate-300" />
+                  <p className="text-sm">No upcoming reviews</p>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {complianceStats && complianceStats.total > 0 && (
+            <div className="bg-white rounded-lg shadow">
+              <div className="p-4 border-b border-slate-200">
+                <div className="flex items-center justify-between">
+                  <h2 className="text-base font-semibold text-slate-900 flex items-center">
+                    <FileText className="w-4 h-4 mr-2 text-slate-600" />
+                    OSFI B-10
+                  </h2>
+                  <Link to="/compliance/osfi-b10" className="text-xs text-slate-600 hover:text-slate-900">
+                    Details
+                  </Link>
+                </div>
+              </div>
+              <div className="p-4">
+                <div className="flex flex-col items-center mb-4">
+                  <div className="relative w-24 h-24">
+                    <svg className="w-24 h-24 transform -rotate-90">
+                      <circle
+                        cx="48"
+                        cy="48"
+                        r="40"
+                        stroke="#e2e8f0"
+                        strokeWidth="8"
+                        fill="none"
+                      />
+                      <circle
+                        cx="48"
+                        cy="48"
+                        r="40"
+                        stroke={complianceStats.score >= 80 ? '#10b981' : complianceStats.score >= 60 ? '#f59e0b' : '#ef4444'}
+                        strokeWidth="8"
+                        fill="none"
+                        strokeDasharray={`${(complianceStats.score / 100) * 251.2} 251.2`}
+                        strokeLinecap="round"
+                      />
+                    </svg>
+                    <div className="absolute inset-0 flex items-center justify-center">
+                      <span className="text-xl font-bold text-slate-900">{complianceStats.score.toFixed(0)}%</span>
+                    </div>
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="text-center p-2 bg-emerald-50 rounded-lg">
+                    <div className="flex items-center justify-center gap-1 mb-1">
+                      <CheckCircle className="w-3 h-3 text-emerald-500" />
+                    </div>
+                    <p className="text-lg font-bold text-emerald-600">{complianceStats.compliant}</p>
+                    <p className="text-xs text-slate-600">Compliant</p>
+                  </div>
+                  <div className="text-center p-2 bg-amber-50 rounded-lg">
+                    <div className="flex items-center justify-center gap-1 mb-1">
+                      <AlertTriangle className="w-3 h-3 text-amber-500" />
+                    </div>
+                    <p className="text-lg font-bold text-amber-600">{complianceStats.partially_compliant}</p>
+                    <p className="text-xs text-slate-600">Partial</p>
+                  </div>
+                  <div className="text-center p-2 bg-red-50 rounded-lg">
+                    <div className="flex items-center justify-center gap-1 mb-1">
+                      <XCircle className="w-3 h-3 text-red-500" />
+                    </div>
+                    <p className="text-lg font-bold text-red-600">{complianceStats.non_compliant}</p>
+                    <p className="text-xs text-slate-600">Non-Compliant</p>
+                  </div>
+                  <div className="text-center p-2 bg-slate-50 rounded-lg">
+                    <p className="text-lg font-bold text-slate-400 mt-4">{complianceStats.not_assessed}</p>
+                    <p className="text-xs text-slate-600">Not Assessed</p>
+                  </div>
+                </div>
+                {complianceStats.non_compliant > 0 && (
+                  <div className="mt-3 p-2 bg-red-50 border border-red-100 rounded-lg">
+                    <p className="text-xs text-red-700">
+                      <span className="font-medium">{complianceStats.non_compliant}</span> require remediation
+                    </p>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+      )}
+
+      {stats.totalVendors === 0 && !access.is1A && (
+        <div className="mt-6 bg-slate-50 border border-slate-200 rounded-lg p-8 text-center">
+          <Building2 className="w-16 h-16 text-slate-400 mx-auto mb-4" />
+          <h3 className="text-xl font-semibold text-slate-900 mb-2">Get Started</h3>
+          <p className="text-slate-600 mb-4">
+            Start managing your third-party relationships by adding your first vendor
+          </p>
+          <Link
+            to="/vendors/new"
+            className="inline-block px-6 py-3 bg-slate-900 text-white rounded-lg hover:bg-slate-800 transition-colors"
+          >
+            Add Your First Third Party
+          </Link>
+        </div>
+      )}
+    </div>
+  );
+}

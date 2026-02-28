@@ -1,0 +1,2723 @@
+import { useState, useEffect } from 'react';
+import { useAuth } from '../contexts/AuthContext';
+import { useOrganization } from '../contexts/OrganizationContext';
+import { supabase } from '../lib/supabase';
+import { logger } from '../lib/logger';
+import { toast } from 'sonner';
+import {
+  Save,
+  User,
+  Bell,
+  Scale,
+  Activity,
+  GitBranch,
+  Users,
+  RefreshCw,
+  Loader2,
+  Info,
+  Building2,
+  Clock,
+  AlertTriangle,
+  TrendingUp,
+  Mail,
+  Layers,
+  Shield,
+  FileText,
+} from 'lucide-react';
+import type { OrganizationSettings } from '../types/organization';
+import type { SeniorApprovalConfig, SeniorApprover } from '../types/workflow';
+import AutoCriticalRulesSettings from '../components/AutoCriticalRulesSettings';
+import TemplateManagement from '../components/TemplateManagement';
+
+type SettingsTab = 'profile' | 'organization' | 'workflow' | 'weights' | 'tiers' | 'auto-critical' | 'templates' | 'kri' | 'lifecycle' | 'users';
+
+interface TierRoutingRule {
+  require_2nd_line: boolean;
+  default_reviewer: string;
+  auto_approve_eligible: boolean;
+}
+
+interface TierRoutingRules {
+  tier_1: TierRoutingRule;
+  tier_2: TierRoutingRule;
+  tier_3: TierRoutingRule;
+  tier_4: TierRoutingRule;
+  tier_5: TierRoutingRule;
+}
+
+interface ReassessmentFrequencies {
+  tier_1: number;
+  tier_2: number;
+  tier_3: number;
+  tier_4: number;
+  tier_5: number;
+}
+
+const DEFAULT_TIER_ROUTING: TierRoutingRules = {
+  tier_1: { require_2nd_line: false, default_reviewer: '1b', auto_approve_eligible: true },
+  tier_2: { require_2nd_line: false, default_reviewer: '1b', auto_approve_eligible: true },
+  tier_3: { require_2nd_line: true, default_reviewer: '2nd', auto_approve_eligible: false },
+  tier_4: { require_2nd_line: true, default_reviewer: '2nd', auto_approve_eligible: false },
+  tier_5: { require_2nd_line: true, default_reviewer: '2nd', auto_approve_eligible: false },
+};
+
+const DEFAULT_REASSESSMENT_FREQUENCIES: ReassessmentFrequencies = {
+  tier_1: 36,
+  tier_2: 24,
+  tier_3: 12,
+  tier_4: 12,
+  tier_5: 6,
+};
+
+interface TierConfigItem {
+  id: string;
+  organization_id: string;
+  tier_level: string;
+  min_risk_score: number;
+  review_frequency_days: number | null;
+  tier_label: string;
+  tier_description: string;
+  tier_color: string;
+  display_order: number;
+}
+
+interface OSFIWeights {
+  id?: string;
+  organization_id?: string;
+  exit_strategy_weight: number;
+  bcp_weight: number;
+  incident_response_weight: number;
+  audit_rights_weight: number;
+  financial_viability_weight: number;
+  insurance_weight: number;
+}
+
+const DEFAULT_OSFI_WEIGHTS: OSFIWeights = {
+  exit_strategy_weight: 0.10,
+  bcp_weight: 0.15,
+  incident_response_weight: 0.10,
+  audit_rights_weight: 0.05,
+  financial_viability_weight: 0.10,
+  insurance_weight: 0.05,
+};
+
+const TIER_COLORS: Record<string, { bg: string; text: string; border: string }> = {
+  red: { bg: 'bg-red-100', text: 'text-red-700', border: 'border-red-300' },
+  orange: { bg: 'bg-orange-100', text: 'text-orange-700', border: 'border-orange-300' },
+  amber: { bg: 'bg-amber-100', text: 'text-amber-700', border: 'border-amber-300' },
+  emerald: { bg: 'bg-emerald-100', text: 'text-emerald-700', border: 'border-emerald-300' },
+  slate: { bg: 'bg-slate-100', text: 'text-slate-600', border: 'border-slate-300' },
+};
+
+const ROLE_OPTIONS = [
+  { value: 'risk_manager', label: 'Risk Manager' },
+  { value: 'vendor_owner', label: 'Vendor Owner' },
+  { value: 'compliance_analyst', label: 'Compliance Analyst' },
+  { value: 'auditor', label: 'Auditor' },
+  { value: 'executive', label: 'Executive' },
+  { value: 'business_user', label: 'Business User' },
+];
+
+const IMPACT_FACTORS = [
+  { key: 'weight_criticality', label: 'Criticality', description: 'Supports essential operations' },
+  { key: 'weight_product_type', label: 'Product/Service Type', description: 'Nature of service provided' },
+  { key: 'weight_dependency', label: 'Dependency Level', description: 'Reliance on the provider' },
+  { key: 'weight_financial_resilience', label: 'Financial Impact', description: 'Cost and financial exposure' },
+  { key: 'weight_strategic_reputational', label: 'Strategic/Reputational', description: 'Public perception impact' },
+  { key: 'weight_data_sensitivity', label: 'Data Sensitivity', description: 'Data handling requirements' },
+];
+
+const LIKELIHOOD_FACTORS = [
+  { key: 'weight_concentration', label: 'Concentration Risk', description: 'Provider availability' },
+  { key: 'weight_access_level', label: 'Access Level', description: 'System and data access' },
+  { key: 'weight_subcontractor', label: 'Subcontractor Risk', description: 'Fourth-party exposure' },
+  { key: 'weight_legal_regulatory', label: 'Legal/Regulatory', description: 'Compliance requirements' },
+  { key: 'weight_operational_maturity', label: 'Operational Maturity', description: 'Provider capability' },
+  { key: 'weight_other_risks', label: 'Other Risk Factors', description: 'ESG, geopolitical, etc.' },
+];
+
+const DEFAULT_ORG_SETTINGS: OrganizationSettings = {
+  require_1b_review: true,
+  require_2nd_line_for_critical: true,
+  auto_approve_low_risk: false,
+  onboarding_sla_days: 30,
+  due_diligence_reminder_days: [30, 14, 7],
+  default_review_frequency_days: 365,
+};
+
+interface UserNotificationPrefs {
+  notification_email: string;
+  receive_task_notifications: boolean;
+  receive_escalation_notifications: boolean;
+}
+
+export default function Settings() {
+  const { user, profile } = useAuth();
+  const { currentOrganization, isAdmin, isPlatformAdmin, updateOrganization, currentMembership } = useOrganization();
+
+  const [activeTab, setActiveTab] = useState<SettingsTab>('profile');
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [profileData, setProfileData] = useState<Record<string, unknown> | null>(null);
+  const [categoryWeights, setCategoryWeights] = useState<Record<string, unknown>[]>([]);
+  const [kriThresholds, setKriThresholds] = useState<Record<string, unknown>[]>([]);
+  const [concentrationThresholds, setConcentrationThresholds] = useState<Record<string, unknown>[]>([]);
+  const [lifecycleConfig, setLifecycleConfig] = useState<Record<string, unknown>[]>([]);
+  const [users, setUsers] = useState<Record<string, unknown>[]>([]);
+  const [selectedCategory, setSelectedCategory] = useState<string>('');
+  const [editingKRI, setEditingKRI] = useState<string | null>(null);
+  const [editingConcentrationThreshold, setEditingConcentrationThreshold] = useState<string | null>(null);
+  const [tierConfig, setTierConfig] = useState<TierConfigItem[]>([]);
+  const [osfiWeights, setOsfiWeights] = useState<OSFIWeights>(DEFAULT_OSFI_WEIGHTS);
+  const [vendorPreviewData, setVendorPreviewData] = useState<{ tier: string; count: number }[]>([]);
+
+  const [orgSettings, setOrgSettings] = useState<OrganizationSettings>(DEFAULT_ORG_SETTINGS);
+  const [riskThresholds, setRiskThresholds] = useState({
+    max_critical_vendors: 50,
+    max_single_vendor_concentration_pct: 25,
+    risk_appetite_statement: '',
+  });
+  const [escalationEmails, setEscalationEmails] = useState({
+    '1b': '',
+    '2nd': '',
+  });
+  const [userNotifPrefs, setUserNotifPrefs] = useState<UserNotificationPrefs>({
+    notification_email: '',
+    receive_task_notifications: true,
+    receive_escalation_notifications: true,
+  });
+
+  const [tierRoutingRules, setTierRoutingRules] = useState<TierRoutingRules>(DEFAULT_TIER_ROUTING);
+  const [reassessmentFrequencies, setReassessmentFrequencies] = useState<ReassessmentFrequencies>(DEFAULT_REASSESSMENT_FREQUENCIES);
+  const [enableFastTrackApproval, setEnableFastTrackApproval] = useState(true);
+
+  const [seniorApprovalConfig, setSeniorApprovalConfig] = useState<SeniorApprovalConfig | null>(null);
+  const [seniorApprovers, setSeniorApprovers] = useState<SeniorApprover[]>([]);
+  const [orgUsers, setOrgUsers] = useState<{ id: string; email: string; full_name?: string }[]>([]);
+  const [newApproverUserId, setNewApproverUserId] = useState('');
+  const [seniorApprovalTiers, setSeniorApprovalTiers] = useState<string[]>(['tier_5_critical']);
+
+  const canManageOrgSettings = isAdmin || isPlatformAdmin;
+  const isRiskManager = profile?.role === 'risk_manager';
+
+  const canConfigureAssessment = () => {
+    if (!currentMembership) return false;
+    return currentMembership.defense_line === '2nd' ||
+           currentMembership.defense_line === 'admin' ||
+           isAdmin ||
+           isPlatformAdmin;
+  };
+
+  useEffect(() => {
+    fetchData();
+  }, [user, currentOrganization]);
+
+  useEffect(() => {
+    if (currentOrganization) {
+      setOrgSettings(currentOrganization.settings || DEFAULT_ORG_SETTINGS);
+      setRiskThresholds({
+        max_critical_vendors: currentOrganization.max_critical_vendors || 50,
+        max_single_vendor_concentration_pct: currentOrganization.max_single_vendor_concentration_pct || 25,
+        risk_appetite_statement: currentOrganization.risk_appetite_statement || '',
+      });
+
+      const settings = currentOrganization.settings as Record<string, unknown> | undefined;
+      if (settings?.tier_routing_rules) {
+        setTierRoutingRules(settings.tier_routing_rules as TierRoutingRules);
+      }
+      if (settings?.reassessment_frequencies) {
+        setReassessmentFrequencies(settings.reassessment_frequencies as ReassessmentFrequencies);
+      }
+      if (typeof settings?.enable_fast_track_approval === 'boolean') {
+        setEnableFastTrackApproval(settings.enable_fast_track_approval);
+      }
+    }
+  }, [currentOrganization]);
+
+  useEffect(() => {
+    if (currentMembership) {
+      setUserNotifPrefs({
+        notification_email: currentMembership.notification_email || user?.email || '',
+        receive_task_notifications: currentMembership.receive_task_notifications ?? true,
+        receive_escalation_notifications: currentMembership.receive_escalation_notifications ?? true,
+      });
+    }
+  }, [currentMembership, user]);
+
+  useEffect(() => {
+    if (currentOrganization) {
+      loadEscalationEmails();
+    }
+  }, [currentOrganization]);
+
+  useEffect(() => {
+    if (currentOrganization && canConfigureAssessment()) {
+      loadSeniorApprovalConfig();
+      loadSeniorApprovers();
+      loadOrgUsers();
+    }
+  }, [currentOrganization]);
+
+  async function loadSeniorApprovalConfig() {
+    if (!currentOrganization) return;
+    try {
+      const { data, error } = await supabase
+        .from('senior_approval_config')
+        .select('*')
+        .eq('organization_id', currentOrganization.id)
+        .maybeSingle();
+
+      if (error && !error.message?.includes('does not exist')) {
+        logger.error('Error loading senior approval config:', error);
+        return;
+      }
+
+      if (data) {
+        setSeniorApprovalConfig(data as SeniorApprovalConfig);
+        setSeniorApprovalTiers(data.tiers_requiring_approval || ['tier_5_critical']);
+      }
+    } catch (error) {
+      logger.error('Error loading senior approval config:', error);
+    }
+  }
+
+  async function loadSeniorApprovers() {
+    if (!currentOrganization) return;
+    try {
+      const { data, error } = await supabase
+        .from('senior_approvers')
+        .select(`
+          *,
+          user:profiles!senior_approvers_user_id_fkey(id, email, full_name)
+        `)
+        .eq('organization_id', currentOrganization.id)
+        .eq('is_active', true)
+        .order('created_at');
+
+      if (error && !error.message?.includes('does not exist')) {
+        logger.error('Error loading senior approvers:', error);
+        return;
+      }
+
+      setSeniorApprovers((data as SeniorApprover[]) || []);
+    } catch (error) {
+      logger.error('Error loading senior approvers:', error);
+    }
+  }
+
+  async function loadOrgUsers() {
+    if (!currentOrganization) return;
+    try {
+      const { data, error } = await supabase
+        .from('organization_users')
+        .select(`
+          user_id,
+          profiles:profiles!organization_users_user_id_fkey(id, email, full_name)
+        `)
+        .eq('organization_id', currentOrganization.id)
+        .eq('is_active', true);
+
+      if (error) {
+        logger.error('Error loading org users:', error);
+        return;
+      }
+
+      const users = (data || [])
+        .map((ou) => ou.profiles as { id: string; email: string; full_name?: string } | null)
+        .filter((p): p is { id: string; email: string; full_name?: string } => p !== null);
+
+      setOrgUsers(users);
+    } catch (error) {
+      logger.error('Error loading org users:', error);
+    }
+  }
+
+  async function loadEscalationEmails() {
+    if (!currentOrganization) return;
+
+    try {
+      const { data, error } = await supabase
+        .from('defense_line_configs')
+        .select('defense_line, escalation_email')
+        .eq('organization_id', currentOrganization.id);
+
+      if (error) {
+        if (!error.message?.includes('does not exist')) {
+          logger.error('Error loading escalation emails:', error);
+        }
+        return;
+      }
+
+      const emails: Record<string, string> = { '1b': '', '2nd': '' };
+      data?.forEach((config) => {
+        if (config.defense_line === '1b' || config.defense_line === '2nd') {
+          emails[config.defense_line] = config.escalation_email || '';
+        }
+      });
+      setEscalationEmails(emails);
+    } catch (error) {
+      logger.error('Error loading escalation emails:', error);
+    }
+  }
+
+  async function fetchData() {
+    setLoading(true);
+    try {
+      const queries = [
+        supabase.from('profiles').select('*').eq('id', user?.id).maybeSingle(),
+        supabase.from('category_weights').select('*').order('category'),
+        supabase.from('kri_thresholds').select('*').order('display_order'),
+        supabase.from('lifecycle_config').select('*').order('display_order'),
+        supabase.from('profiles').select('*').order('created_at', { ascending: false }),
+      ];
+
+      const [profileRes, weightsRes, kriRes, lifecycleRes, usersRes] = await Promise.all(queries);
+
+      setProfileData(profileRes.data);
+      setKriThresholds(kriRes.data || []);
+      setLifecycleConfig(lifecycleRes.data || []);
+      setUsers(usersRes.data || []);
+
+      if (weightsRes.error) {
+        logger.error('Error fetching category weights:', weightsRes.error);
+        toast.error('Failed to load category weights');
+        setCategoryWeights([]);
+      } else if (weightsRes.data && weightsRes.data.length > 0) {
+        setCategoryWeights(weightsRes.data);
+        setSelectedCategory(weightsRes.data[0].category as string);
+      } else {
+        setCategoryWeights([]);
+      }
+
+      if (currentOrganization) {
+        await fetchTierConfig();
+        await fetchOsfiWeights();
+        await fetchVendorPreview();
+        await fetchConcentrationThresholds();
+      }
+    } catch (error) {
+      logger.error('Error fetching settings:', error);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function fetchConcentrationThresholds() {
+    if (!currentOrganization) return;
+    try {
+      const { data, error } = await supabase
+        .from('concentration_thresholds')
+        .select('*')
+        .eq('organization_id', currentOrganization.id)
+        .order('threshold_type');
+
+      if (error) throw error;
+      setConcentrationThresholds(data || []);
+    } catch (error) {
+      logger.error('Error fetching concentration thresholds:', error);
+    }
+  }
+
+  async function fetchTierConfig() {
+    if (!currentOrganization) return;
+    try {
+      const { data, error } = await supabase
+        .from('organization_tier_config')
+        .select('*')
+        .eq('organization_id', currentOrganization.id)
+        .order('display_order');
+
+      if (error) throw error;
+      setTierConfig(data || []);
+    } catch (error) {
+      logger.error('Error fetching tier config:', error);
+    }
+  }
+
+  async function fetchOsfiWeights() {
+    if (!currentOrganization) return;
+    try {
+      const { data, error } = await supabase
+        .from('organization_osfi_weights')
+        .select('*')
+        .eq('organization_id', currentOrganization.id)
+        .maybeSingle();
+
+      if (error) throw error;
+      if (data) {
+        setOsfiWeights(data);
+      }
+    } catch (error) {
+      logger.error('Error fetching OSFI weights:', error);
+    }
+  }
+
+  async function fetchVendorPreview() {
+    if (!currentOrganization) return;
+    try {
+      const { data, error } = await supabase
+        .from('vendors')
+        .select('tier, id')
+        .eq('organization_id', currentOrganization.id);
+
+      if (error) throw error;
+
+      const counts = (data || []).reduce((acc: Record<string, number>, v) => {
+        const tier = v.tier || 'unassessed';
+        acc[tier] = (acc[tier] || 0) + 1;
+        return acc;
+      }, {});
+
+      setVendorPreviewData(
+        Object.entries(counts).map(([tier, count]) => ({ tier, count }))
+      );
+    } catch (error) {
+      logger.error('Error fetching vendor preview:', error);
+    }
+  }
+
+  async function handleSaveProfile() {
+    if (!user || !profileData) return;
+    setSaving(true);
+    try {
+      const { error } = await supabase
+        .from('profiles')
+        .update({
+          full_name: profileData.full_name,
+          role: profileData.role,
+          department: profileData.department,
+        })
+        .eq('id', user.id);
+
+      if (error) throw error;
+      toast.success('Profile saved successfully');
+    } catch (error) {
+      logger.error('Error saving profile:', error);
+      toast.error('Failed to save profile');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleSaveUserNotificationPrefs() {
+    if (!currentOrganization || !user) return;
+    setSaving(true);
+    try {
+      const { error } = await supabase
+        .from('organization_users')
+        .update({
+          notification_email: userNotifPrefs.notification_email || null,
+          receive_task_notifications: userNotifPrefs.receive_task_notifications,
+          receive_escalation_notifications: userNotifPrefs.receive_escalation_notifications,
+        })
+        .eq('organization_id', currentOrganization.id)
+        .eq('user_id', user.id);
+
+      if (error) throw error;
+      toast.success('Notification preferences saved');
+    } catch (error) {
+      logger.error('Error saving notification preferences:', error);
+      toast.error('Failed to save notification preferences');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleSaveOrgSettings() {
+    if (!currentOrganization || !canManageOrgSettings) return;
+
+    if (orgSettings.onboarding_sla_days < 1) {
+      toast.error('Onboarding SLA must be at least 1 day');
+      return;
+    }
+
+    if (riskThresholds.max_critical_vendors < 1) {
+      toast.error('Max critical vendors must be at least 1');
+      return;
+    }
+
+    if (riskThresholds.max_single_vendor_concentration_pct < 1 || riskThresholds.max_single_vendor_concentration_pct > 100) {
+      toast.error('Concentration limit must be between 1% and 100%');
+      return;
+    }
+
+    setSaving(true);
+    try {
+      const success = await updateOrganization({
+        settings: orgSettings,
+        max_critical_vendors: riskThresholds.max_critical_vendors,
+        max_single_vendor_concentration_pct: riskThresholds.max_single_vendor_concentration_pct,
+        risk_appetite_statement: riskThresholds.risk_appetite_statement,
+      });
+
+      if (!success) {
+        throw new Error('Failed to update organization');
+      }
+
+      await saveEscalationEmails();
+
+      toast.success('Organization settings saved');
+    } catch (error) {
+      logger.error('Error saving organization settings:', error);
+      toast.error('Failed to save organization settings');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleSaveWorkflowConfig() {
+    if (!currentOrganization || !canConfigureAssessment()) return;
+
+    setSaving(true);
+    try {
+      const updatedSettings = {
+        ...currentOrganization.settings,
+        tier_routing_rules: tierRoutingRules,
+        reassessment_frequencies: reassessmentFrequencies,
+        enable_fast_track_approval: enableFastTrackApproval,
+      };
+
+      const success = await updateOrganization({
+        settings: updatedSettings,
+      });
+
+      if (!success) {
+        throw new Error('Failed to update workflow configuration');
+      }
+
+      toast.success('Workflow configuration saved');
+    } catch (error) {
+      logger.error('Error saving workflow configuration:', error);
+      toast.error('Failed to save workflow configuration');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleSaveSeniorApprovalConfig() {
+    if (!currentOrganization || !canConfigureAssessment()) return;
+
+    setSaving(true);
+    try {
+      const configData = {
+        organization_id: currentOrganization.id,
+        tiers_requiring_approval: seniorApprovalTiers,
+        contract_value_threshold_cad: seniorApprovalConfig?.contract_value_threshold_cad || null,
+        require_for_outsourcing: seniorApprovalConfig?.require_for_outsourcing ?? true,
+        auto_escalate_after_days: seniorApprovalConfig?.auto_escalate_after_days || 3,
+        reminder_after_days: seniorApprovalConfig?.reminder_after_days || 1,
+        notify_on_assignment: seniorApprovalConfig?.notify_on_assignment ?? true,
+        notify_on_completion: seniorApprovalConfig?.notify_on_completion ?? true,
+        updated_at: new Date().toISOString(),
+        created_by: user?.id,
+      };
+
+      const { error } = await supabase
+        .from('senior_approval_config')
+        .upsert(configData, { onConflict: 'organization_id' });
+
+      if (error) throw error;
+
+      toast.success('Senior approval configuration saved');
+      await loadSeniorApprovalConfig();
+    } catch (error) {
+      logger.error('Error saving senior approval config:', error);
+      toast.error('Failed to save senior approval configuration');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleAddSeniorApprover() {
+    if (!currentOrganization || !newApproverUserId) return;
+
+    const existingApprover = seniorApprovers.find(a => a.user_id === newApproverUserId);
+    if (existingApprover) {
+      toast.error('This user is already a senior approver');
+      return;
+    }
+
+    setSaving(true);
+    try {
+      const { error } = await supabase
+        .from('senior_approvers')
+        .insert({
+          organization_id: currentOrganization.id,
+          user_id: newApproverUserId,
+          approval_authority_level: 1,
+          can_approve_tiers: seniorApprovalTiers,
+          is_delegate: false,
+          is_available: true,
+          receive_notifications: true,
+          is_active: true,
+          created_by: user?.id,
+        });
+
+      if (error) throw error;
+
+      toast.success('Senior approver added');
+      setNewApproverUserId('');
+      await loadSeniorApprovers();
+    } catch (error) {
+      logger.error('Error adding senior approver:', error);
+      toast.error('Failed to add senior approver');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleRemoveSeniorApprover(approverId: string) {
+    if (!currentOrganization) return;
+
+    setSaving(true);
+    try {
+      const { error } = await supabase
+        .from('senior_approvers')
+        .update({ is_active: false })
+        .eq('id', approverId)
+        .eq('organization_id', currentOrganization.id);
+
+      if (error) throw error;
+
+      toast.success('Senior approver removed');
+      await loadSeniorApprovers();
+    } catch (error) {
+      logger.error('Error removing senior approver:', error);
+      toast.error('Failed to remove senior approver');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function saveEscalationEmails() {
+    if (!currentOrganization) return;
+
+    for (const [defenseLine, email] of Object.entries(escalationEmails)) {
+      try {
+        const { error } = await supabase
+          .from('defense_line_configs')
+          .upsert({
+            organization_id: currentOrganization.id,
+            defense_line: defenseLine,
+            escalation_email: email || null,
+            display_name: defenseLine === '1b' ? '1st Line Coordinator' : '2nd Line Risk',
+            is_required_in_workflow: true,
+            review_sla_hours: 48,
+            escalation_after_hours: 72,
+            notify_on_new_request: true,
+            notify_on_overdue: true,
+          }, {
+            onConflict: 'organization_id,defense_line',
+          });
+
+        if (error && !error.message?.includes('does not exist')) {
+          logger.error(`Error saving ${defenseLine} escalation email:`, error);
+        }
+      } catch (error) {
+        logger.error(`Error saving ${defenseLine} escalation email:`, error);
+      }
+    }
+  }
+
+  async function handleSaveWeights() {
+    const category = categoryWeights.find((c) => c.category === selectedCategory);
+    if (!category) return;
+
+    const impactSum = IMPACT_FACTORS.reduce((sum, f) => sum + (parseFloat(String(category[f.key])) || 0), 0);
+    const likelihoodSum = LIKELIHOOD_FACTORS.reduce((sum, f) => sum + (parseFloat(String(category[f.key])) || 0), 0);
+
+    if (Math.abs(impactSum - 1) > 0.001 || Math.abs(likelihoodSum - 1) > 0.001) {
+      toast.error('Impact weights must sum to 1.0 and Likelihood weights must sum to 1.0');
+      return;
+    }
+
+    setSaving(true);
+    try {
+      const { error } = await supabase
+        .from('category_weights')
+        .update({
+          ...IMPACT_FACTORS.reduce((acc, f) => ({ ...acc, [f.key]: category[f.key] }), {}),
+          ...LIKELIHOOD_FACTORS.reduce((acc, f) => ({ ...acc, [f.key]: category[f.key] }), {}),
+          updated_at: new Date().toISOString(),
+          updated_by: user?.id,
+        })
+        .eq('category', selectedCategory);
+
+      if (error) throw error;
+      toast.success('Weights saved successfully');
+    } catch (error) {
+      logger.error('Error saving weights:', error);
+      toast.error('Failed to save weights');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleResetWeights() {
+    const defaultWeights = {
+      weight_criticality: 0.2,
+      weight_product_type: 0.15,
+      weight_dependency: 0.2,
+      weight_financial_resilience: 0.15,
+      weight_strategic_reputational: 0.15,
+      weight_data_sensitivity: 0.15,
+      weight_concentration: 0.15,
+      weight_access_level: 0.2,
+      weight_subcontractor: 0.15,
+      weight_legal_regulatory: 0.2,
+      weight_operational_maturity: 0.15,
+      weight_other_risks: 0.15,
+    };
+
+    setCategoryWeights((prev) =>
+      prev.map((c) =>
+        c.category === selectedCategory ? { ...c, ...defaultWeights } : c
+      )
+    );
+  }
+
+  function validateTierThresholds(): boolean {
+    const sortedTiers = [...tierConfig].sort((a, b) => a.display_order - b.display_order);
+    for (let i = 0; i < sortedTiers.length - 1; i++) {
+      if (sortedTiers[i].min_risk_score <= sortedTiers[i + 1].min_risk_score) {
+        toast.error(`${sortedTiers[i].tier_label} threshold must be higher than ${sortedTiers[i + 1].tier_label}`);
+        return false;
+      }
+    }
+    return true;
+  }
+
+  async function handleSaveTierConfig() {
+    if (!currentOrganization || !canManageOrgSettings) return;
+
+    if (!validateTierThresholds()) return;
+
+    setSaving(true);
+    try {
+      for (const tier of tierConfig) {
+        const { error } = await supabase
+          .from('organization_tier_config')
+          .update({
+            min_risk_score: tier.min_risk_score,
+            review_frequency_days: tier.review_frequency_days,
+            tier_label: tier.tier_label,
+            tier_description: tier.tier_description,
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', tier.id);
+
+        if (error) throw error;
+      }
+      toast.success('Tier configuration saved');
+    } catch (error) {
+      logger.error('Error saving tier config:', error);
+      toast.error('Failed to save tier configuration');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleSaveOsfiWeights() {
+    if (!currentOrganization || !canManageOrgSettings) return;
+
+    const totalWeight =
+      osfiWeights.exit_strategy_weight +
+      osfiWeights.bcp_weight +
+      osfiWeights.incident_response_weight +
+      osfiWeights.audit_rights_weight +
+      osfiWeights.financial_viability_weight +
+      osfiWeights.insurance_weight;
+
+    if (totalWeight < 0.01) {
+      toast.error('At least one OSFI weight must be greater than 0');
+      return;
+    }
+
+    setSaving(true);
+    try {
+      const { error } = await supabase
+        .from('organization_osfi_weights')
+        .upsert({
+          organization_id: currentOrganization.id,
+          ...osfiWeights,
+          updated_at: new Date().toISOString(),
+        }, { onConflict: 'organization_id' });
+
+      if (error) throw error;
+      toast.success('OSFI weights saved');
+    } catch (error) {
+      logger.error('Error saving OSFI weights:', error);
+      toast.error('Failed to save OSFI weights');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function handleResetTierConfig() {
+    setTierConfig(prev => prev.map(tier => {
+      const defaults: Record<string, { score: number; days: number | null }> = {
+        tier_5_critical: { score: 15, days: 90 },
+        tier_4_high: { score: 10, days: 180 },
+        tier_3_moderate: { score: 5, days: 365 },
+        tier_2_low: { score: 2, days: 730 },
+        tier_1_informational: { score: 0, days: null },
+      };
+      const def = defaults[tier.tier_level];
+      return def ? { ...tier, min_risk_score: def.score, review_frequency_days: def.days } : tier;
+    }));
+  }
+
+  function handleResetOsfiWeights() {
+    setOsfiWeights(DEFAULT_OSFI_WEIGHTS);
+  }
+
+  function updateTierConfig(tierLevel: string, field: string, value: unknown) {
+    setTierConfig(prev =>
+      prev.map(t =>
+        t.tier_level === tierLevel ? { ...t, [field]: value } : t
+      )
+    );
+  }
+
+  async function handleSaveConcentrationThreshold(thresholdId: string) {
+    if (!currentOrganization) return;
+
+    const threshold = concentrationThresholds.find((t) => t.id === thresholdId);
+    if (!threshold) return;
+
+    const warningLevel = parseFloat(String(threshold.warning_level)) || 0;
+    const criticalLevel = parseFloat(String(threshold.critical_level)) || 0;
+
+    if (warningLevel <= 0 || criticalLevel <= 0) {
+      toast.error('Threshold levels must be greater than 0');
+      return;
+    }
+
+    if (warningLevel >= criticalLevel) {
+      toast.error('Warning level must be less than critical level');
+      return;
+    }
+
+    setSaving(true);
+    try {
+      const { error } = await supabase
+        .from('concentration_thresholds')
+        .update({
+          warning_level: warningLevel,
+          critical_level: criticalLevel,
+          is_active: threshold.is_active,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', thresholdId)
+        .eq('organization_id', currentOrganization.id);
+
+      if (error) throw error;
+
+      setEditingConcentrationThreshold(null);
+      toast.success('Concentration threshold saved');
+      await fetchConcentrationThresholds();
+    } catch (error) {
+      logger.error('Error saving concentration threshold:', error);
+      toast.error('Failed to save concentration threshold');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function updateConcentrationThreshold(thresholdId: string, field: string, value: unknown) {
+    setConcentrationThresholds((prev) =>
+      prev.map((t) =>
+        t.id === thresholdId ? { ...t, [field]: value } : t
+      )
+    );
+  }
+
+  async function handleSaveKRI(kriCode: string) {
+    const kri = kriThresholds.find((k) => k.kri_code === kriCode);
+    if (!kri) return;
+
+    setSaving(true);
+    try {
+      const { error } = await supabase
+        .from('kri_thresholds')
+        .update({
+          green_min: kri.green_min,
+          green_max: kri.green_max,
+          amber_min: kri.amber_min,
+          amber_max: kri.amber_max,
+          red_min: kri.red_min,
+          red_max: kri.red_max,
+          is_enabled: kri.is_enabled,
+          notify_on_amber: kri.notify_on_amber,
+          notify_on_red: kri.notify_on_red,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('kri_code', kriCode);
+
+      if (error) throw error;
+      setEditingKRI(null);
+      toast.success('KRI threshold saved');
+    } catch (error) {
+      logger.error('Error saving KRI:', error);
+      toast.error('Failed to save KRI threshold');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleSaveLifecycle(stageCode: string) {
+    const stage = lifecycleConfig.find((s) => s.stage_code === stageCode);
+    if (!stage) return;
+
+    setSaving(true);
+    try {
+      const { error } = await supabase
+        .from('lifecycle_config')
+        .update({
+          stage_name: stage.stage_name,
+          description: stage.description,
+          is_active: stage.is_active,
+          notification_on_enter: stage.notification_on_enter,
+          days_until_escalation: stage.days_until_escalation,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('stage_code', stageCode);
+
+      if (error) throw error;
+      toast.success('Lifecycle stage saved');
+    } catch (error) {
+      logger.error('Error saving lifecycle:', error);
+      toast.error('Failed to save lifecycle stage');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleUpdateUserRole(userId: string, newRole: string) {
+    setSaving(true);
+    try {
+      const { error } = await supabase
+        .from('profiles')
+        .update({ role: newRole })
+        .eq('id', userId);
+
+      if (error) throw error;
+      setUsers((prev) =>
+        prev.map((u) => (u.id === userId ? { ...u, role: newRole } : u))
+      );
+      toast.success('User role updated');
+    } catch (error) {
+      logger.error('Error updating user role:', error);
+      toast.error('Failed to update user role');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function updateWeight(factor: string, value: string) {
+    setCategoryWeights((prev) =>
+      prev.map((c) =>
+        c.category === selectedCategory
+          ? { ...c, [factor]: parseFloat(value) || 0 }
+          : c
+      )
+    );
+  }
+
+  function updateKRI(kriCode: string, field: string, value: unknown) {
+    setKriThresholds((prev) =>
+      prev.map((k) =>
+        k.kri_code === kriCode ? { ...k, [field]: value } : k
+      )
+    );
+  }
+
+  function updateLifecycle(stageCode: string, field: string, value: unknown) {
+    setLifecycleConfig((prev) =>
+      prev.map((s) =>
+        s.stage_code === stageCode ? { ...s, [field]: value } : s
+      )
+    );
+  }
+
+  function handleReminderDaysChange(value: string) {
+    const days = value.split(',').map(d => parseInt(d.trim())).filter(d => !isNaN(d) && d > 0);
+    setOrgSettings(prev => ({ ...prev, due_diligence_reminder_days: days }));
+  }
+
+  const selectedCategoryData = categoryWeights.find((c) => c.category === selectedCategory);
+  const impactSum = selectedCategoryData
+    ? IMPACT_FACTORS.reduce((sum, f) => sum + (parseFloat(String(selectedCategoryData[f.key])) || 0), 0)
+    : 0;
+  const likelihoodSum = selectedCategoryData
+    ? LIKELIHOOD_FACTORS.reduce((sum, f) => sum + (parseFloat(String(selectedCategoryData[f.key])) || 0), 0)
+    : 0;
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center h-64">
+        <Loader2 className="w-8 h-8 animate-spin text-slate-400" />
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <h1 className="text-3xl font-bold text-gray-900">Settings</h1>
+        <p className="mt-1 text-sm text-gray-500">
+          Manage account, organization, and system preferences
+        </p>
+      </div>
+
+      <div className="bg-white rounded-lg shadow">
+        <div className="border-b border-gray-200">
+          <nav className="flex -mb-px overflow-x-auto">
+            {[
+              { id: 'profile', label: 'Profile', icon: User },
+              { id: 'organization', label: 'Organization', icon: Building2, adminOnly: true },
+              { id: 'workflow', label: 'Workflow Config', icon: GitBranch, assessmentConfig: true },
+              { id: 'weights', label: 'Category Weights', icon: Scale, adminOnly: true },
+              { id: 'tiers', label: 'Tier Configuration', icon: Layers, adminOnly: true },
+              { id: 'auto-critical', label: 'Auto-Critical Rules', icon: Shield, adminOnly: true },
+              { id: 'templates', label: 'Onboarding Templates', icon: FileText, adminOnly: true },
+              { id: 'kri', label: 'KRI Thresholds', icon: Activity, adminOnly: true },
+              { id: 'lifecycle', label: 'Lifecycle Config', icon: GitBranch, adminOnly: true },
+              { id: 'users', label: 'User Management', icon: Users, adminOnly: true },
+            ].map((tab) => {
+              if (tab.adminOnly && !isRiskManager && !canManageOrgSettings) return null;
+              if (tab.assessmentConfig && !canConfigureAssessment()) return null;
+              const Icon = tab.icon;
+              return (
+                <button
+                  key={tab.id}
+                  onClick={() => setActiveTab(tab.id as SettingsTab)}
+                  className={`flex items-center gap-2 px-6 py-4 text-sm font-medium border-b-2 whitespace-nowrap transition-colors ${
+                    activeTab === tab.id
+                      ? 'border-blue-600 text-blue-600'
+                      : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+                  }`}
+                >
+                  <Icon className="w-4 h-4" />
+                  {tab.label}
+                </button>
+              );
+            })}
+          </nav>
+        </div>
+
+        <div className="p-6">
+          {activeTab === 'profile' && (
+            <div className="max-w-2xl space-y-6">
+              <div className="flex items-center gap-2 mb-4">
+                <User className="w-5 h-5 text-blue-600" />
+                <h2 className="text-lg font-semibold text-gray-900">Profile Information</h2>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Full Name</label>
+                  <input
+                    type="text"
+                    value={String(profileData?.full_name || '')}
+                    onChange={(e) => setProfileData({ ...profileData, full_name: e.target.value })}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Email</label>
+                  <input
+                    type="email"
+                    value={user?.email || ''}
+                    disabled
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg bg-gray-50 text-gray-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Role</label>
+                  <select
+                    value={String(profileData?.role || '')}
+                    onChange={(e) => setProfileData({ ...profileData, role: e.target.value })}
+                    disabled={!isRiskManager}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 disabled:bg-gray-50"
+                  >
+                    {ROLE_OPTIONS.map((role) => (
+                      <option key={role.value} value={role.value}>{role.label}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Department</label>
+                  <input
+                    type="text"
+                    value={String(profileData?.department || '')}
+                    onChange={(e) => setProfileData({ ...profileData, department: e.target.value })}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                  />
+                </div>
+              </div>
+
+              <div className="flex justify-end">
+                <button
+                  onClick={handleSaveProfile}
+                  disabled={saving}
+                  className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:bg-gray-400"
+                >
+                  <Save className="w-5 h-5" />
+                  {saving ? 'Saving...' : 'Save Profile'}
+                </button>
+              </div>
+
+              {currentOrganization && currentMembership && (
+                <>
+                  <div className="pt-6 border-t border-gray-200">
+                    <div className="flex items-center gap-2 mb-4">
+                      <Bell className="w-5 h-5 text-blue-600" />
+                      <h3 className="text-lg font-semibold text-gray-900">My Notification Preferences</h3>
+                    </div>
+                    <p className="text-sm text-gray-500 mb-4">
+                      Configure how you receive notifications for {currentOrganization.name}
+                    </p>
+
+                    <div className="space-y-4">
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">
+                          Notification Email
+                        </label>
+                        <input
+                          type="email"
+                          value={userNotifPrefs.notification_email}
+                          onChange={(e) => setUserNotifPrefs(prev => ({ ...prev, notification_email: e.target.value }))}
+                          placeholder={user?.email || 'your@email.com'}
+                          className="w-full max-w-md px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                        />
+                        <p className="mt-1 text-xs text-gray-500">Leave blank to use your account email</p>
+                      </div>
+
+                      <div className="space-y-3">
+                        <label className="flex items-center gap-3">
+                          <input
+                            type="checkbox"
+                            checked={userNotifPrefs.receive_task_notifications}
+                            onChange={(e) => setUserNotifPrefs(prev => ({ ...prev, receive_task_notifications: e.target.checked }))}
+                            className="w-4 h-4 text-blue-600 rounded border-gray-300 focus:ring-blue-500"
+                          />
+                          <div>
+                            <span className="text-sm font-medium text-gray-700">Task Notifications</span>
+                            <p className="text-xs text-gray-500">Receive emails when tasks are assigned to you or need your review</p>
+                          </div>
+                        </label>
+
+                        <label className="flex items-center gap-3">
+                          <input
+                            type="checkbox"
+                            checked={userNotifPrefs.receive_escalation_notifications}
+                            onChange={(e) => setUserNotifPrefs(prev => ({ ...prev, receive_escalation_notifications: e.target.checked }))}
+                            className="w-4 h-4 text-blue-600 rounded border-gray-300 focus:ring-blue-500"
+                          />
+                          <div>
+                            <span className="text-sm font-medium text-gray-700">Escalation Notifications</span>
+                            <p className="text-xs text-gray-500">Receive emails for overdue items and SLA breaches</p>
+                          </div>
+                        </label>
+                      </div>
+                    </div>
+
+                    <div className="flex justify-end mt-4">
+                      <button
+                        onClick={handleSaveUserNotificationPrefs}
+                        disabled={saving}
+                        className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:bg-gray-400"
+                      >
+                        <Save className="w-5 h-5" />
+                        {saving ? 'Saving...' : 'Save Preferences'}
+                      </button>
+                    </div>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+
+          {activeTab === 'organization' && canManageOrgSettings && currentOrganization && (
+            <div className="space-y-8">
+              <div className="flex items-center gap-2">
+                <Building2 className="w-5 h-5 text-blue-600" />
+                <h2 className="text-lg font-semibold text-gray-900">
+                  Organization Settings - {currentOrganization.name}
+                </h2>
+              </div>
+
+              <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
+                <div className="flex items-start gap-2">
+                  <Info className="w-5 h-5 text-blue-600 mt-0.5" />
+                  <div className="text-sm text-blue-700">
+                    <p className="font-medium">Configuration Overview</p>
+                    <p className="mt-1">
+                      These settings control workflow behavior, notification timing, and risk thresholds
+                      for your organization. Changes apply immediately to all new requests.
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                <div className="border border-gray-200 rounded-lg p-5">
+                  <div className="flex items-center gap-2 mb-4">
+                    <Clock className="w-5 h-5 text-emerald-600" />
+                    <h3 className="font-semibold text-gray-900">Workflow Settings</h3>
+                  </div>
+
+                  <div className="space-y-4">
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">
+                        Onboarding SLA (Days)
+                      </label>
+                      <input
+                        type="number"
+                        min="1"
+                        max="365"
+                        value={orgSettings.onboarding_sla_days}
+                        onChange={(e) => setOrgSettings(prev => ({ ...prev, onboarding_sla_days: parseInt(e.target.value) || 30 }))}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                      />
+                      <p className="mt-1 text-xs text-gray-500">Target days to complete vendor onboarding</p>
+                    </div>
+
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">
+                        Default Review Frequency (Days)
+                      </label>
+                      <input
+                        type="number"
+                        min="30"
+                        max="730"
+                        value={orgSettings.default_review_frequency_days}
+                        onChange={(e) => setOrgSettings(prev => ({ ...prev, default_review_frequency_days: parseInt(e.target.value) || 365 }))}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                      />
+                      <p className="mt-1 text-xs text-gray-500">How often vendors should be reviewed</p>
+                    </div>
+
+                    <div className="space-y-3 pt-2">
+                      <label className="flex items-center gap-3">
+                        <input
+                          type="checkbox"
+                          checked={orgSettings.require_1b_review}
+                          onChange={(e) => setOrgSettings(prev => ({ ...prev, require_1b_review: e.target.checked }))}
+                          className="w-4 h-4 text-blue-600 rounded border-gray-300 focus:ring-blue-500"
+                        />
+                        <div>
+                          <span className="text-sm font-medium text-gray-700">Require 1B Coordinator Review</span>
+                          <p className="text-xs text-gray-500">All requests must pass through 1st line coordinator</p>
+                        </div>
+                      </label>
+
+                      <label className="flex items-center gap-3">
+                        <input
+                          type="checkbox"
+                          checked={orgSettings.require_2nd_line_for_critical}
+                          onChange={(e) => setOrgSettings(prev => ({ ...prev, require_2nd_line_for_critical: e.target.checked }))}
+                          className="w-4 h-4 text-blue-600 rounded border-gray-300 focus:ring-blue-500"
+                        />
+                        <div>
+                          <span className="text-sm font-medium text-gray-700">Require 2nd Line for Critical</span>
+                          <p className="text-xs text-gray-500">Critical/high-risk vendors require 2nd line approval</p>
+                        </div>
+                      </label>
+
+                      <label className="flex items-center gap-3">
+                        <input
+                          type="checkbox"
+                          checked={orgSettings.auto_approve_low_risk}
+                          onChange={(e) => setOrgSettings(prev => ({ ...prev, auto_approve_low_risk: e.target.checked }))}
+                          className="w-4 h-4 text-blue-600 rounded border-gray-300 focus:ring-blue-500"
+                        />
+                        <div>
+                          <span className="text-sm font-medium text-gray-700">Auto-Approve Low Risk</span>
+                          <p className="text-xs text-gray-500">Low-risk vendors can be auto-approved after 1B review</p>
+                        </div>
+                      </label>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="border border-gray-200 rounded-lg p-5">
+                  <div className="flex items-center gap-2 mb-4">
+                    <Mail className="w-5 h-5 text-amber-600" />
+                    <h3 className="font-semibold text-gray-900">Notification Settings</h3>
+                  </div>
+
+                  <div className="space-y-4">
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">
+                        Due Diligence Reminder Days
+                      </label>
+                      <input
+                        type="text"
+                        value={orgSettings.due_diligence_reminder_days.join(', ')}
+                        onChange={(e) => handleReminderDaysChange(e.target.value)}
+                        placeholder="30, 14, 7"
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                      />
+                      <p className="mt-1 text-xs text-gray-500">Days before due date to send reminders (comma-separated)</p>
+                    </div>
+
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">
+                        1B Coordinator Escalation Email
+                      </label>
+                      <input
+                        type="email"
+                        value={escalationEmails['1b']}
+                        onChange={(e) => setEscalationEmails(prev => ({ ...prev, '1b': e.target.value }))}
+                        placeholder="coordinator-escalation@company.com"
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                      />
+                      <p className="mt-1 text-xs text-gray-500">Email for 1B review escalations</p>
+                    </div>
+
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">
+                        2nd Line Escalation Email
+                      </label>
+                      <input
+                        type="email"
+                        value={escalationEmails['2nd']}
+                        onChange={(e) => setEscalationEmails(prev => ({ ...prev, '2nd': e.target.value }))}
+                        placeholder="risk-escalation@company.com"
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                      />
+                      <p className="mt-1 text-xs text-gray-500">Email for 2nd line review escalations</p>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="border border-gray-200 rounded-lg p-5 lg:col-span-2">
+                  <div className="flex items-center gap-2 mb-4">
+                    <TrendingUp className="w-5 h-5 text-red-600" />
+                    <h3 className="font-semibold text-gray-900">Risk Thresholds</h3>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">
+                        Maximum Critical Vendors
+                      </label>
+                      <input
+                        type="number"
+                        min="1"
+                        max="1000"
+                        value={riskThresholds.max_critical_vendors}
+                        onChange={(e) => setRiskThresholds(prev => ({ ...prev, max_critical_vendors: parseInt(e.target.value) || 50 }))}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                      />
+                      <p className="mt-1 text-xs text-gray-500">Alert when critical vendor count exceeds this threshold</p>
+                    </div>
+
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">
+                        Single Vendor Concentration Limit (%)
+                      </label>
+                      <input
+                        type="number"
+                        min="1"
+                        max="100"
+                        value={riskThresholds.max_single_vendor_concentration_pct}
+                        onChange={(e) => setRiskThresholds(prev => ({ ...prev, max_single_vendor_concentration_pct: parseInt(e.target.value) || 25 }))}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                      />
+                      <p className="mt-1 text-xs text-gray-500">Maximum spend concentration with a single vendor</p>
+                    </div>
+
+                    <div className="md:col-span-2">
+                      <label className="block text-sm font-medium text-gray-700 mb-1">
+                        Risk Appetite Statement
+                      </label>
+                      <textarea
+                        value={riskThresholds.risk_appetite_statement}
+                        onChange={(e) => setRiskThresholds(prev => ({ ...prev, risk_appetite_statement: e.target.value }))}
+                        rows={3}
+                        placeholder="Describe your organization's third-party risk appetite..."
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                      />
+                      <p className="mt-1 text-xs text-gray-500">Optional statement displayed on risk dashboards and reports</p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="border border-gray-200 rounded-lg p-5 lg:col-span-2">
+                <div className="flex items-center justify-between mb-4">
+                  <div className="flex items-center gap-2">
+                    <Layers className="w-5 h-5 text-blue-600" />
+                    <h3 className="font-semibold text-gray-900">Concentration Thresholds</h3>
+                  </div>
+                  <div className="text-xs text-gray-500">
+                    Used in Concentration Dashboard
+                  </div>
+                </div>
+
+                <div className="space-y-4">
+                  {concentrationThresholds.length === 0 ? (
+                    <div className="text-center py-8 text-gray-500">
+                      <Info className="w-8 h-8 mx-auto mb-2 text-gray-400" />
+                      <p className="text-sm">No concentration thresholds configured</p>
+                      <p className="text-xs mt-1">Thresholds will be created automatically</p>
+                    </div>
+                  ) : (
+                    concentrationThresholds.map((threshold) => (
+                      <div key={threshold.id} className="border border-gray-200 rounded-lg p-4">
+                        <div className="flex items-start justify-between mb-3">
+                          <div className="flex-1">
+                            <h4 className="font-medium text-gray-900">{threshold.threshold_name}</h4>
+                            <p className="text-xs text-gray-500 mt-0.5">{threshold.description}</p>
+                          </div>
+                          <label className="flex items-center gap-2">
+                            <input
+                              type="checkbox"
+                              checked={Boolean(threshold.is_active)}
+                              onChange={(e) =>
+                                updateConcentrationThreshold(
+                                  String(threshold.id),
+                                  'is_active',
+                                  e.target.checked
+                                )
+                              }
+                              className="w-4 h-4 text-blue-600 rounded border-gray-300 focus:ring-blue-500"
+                            />
+                            <span className="text-xs text-gray-600">Active</span>
+                          </label>
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-4">
+                          <div>
+                            <label className="block text-xs font-medium text-gray-700 mb-1">
+                              Warning Level (%)
+                            </label>
+                            <input
+                              type="number"
+                              min="1"
+                              max="100"
+                              value={threshold.warning_level}
+                              onChange={(e) =>
+                                updateConcentrationThreshold(
+                                  String(threshold.id),
+                                  'warning_level',
+                                  parseFloat(e.target.value) || 0
+                                )
+                              }
+                              disabled={editingConcentrationThreshold !== threshold.id}
+                              className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 disabled:bg-gray-50 disabled:text-gray-500"
+                            />
+                          </div>
+
+                          <div>
+                            <label className="block text-xs font-medium text-gray-700 mb-1">
+                              Critical Level (%)
+                            </label>
+                            <input
+                              type="number"
+                              min="1"
+                              max="100"
+                              value={threshold.critical_level}
+                              onChange={(e) =>
+                                updateConcentrationThreshold(
+                                  String(threshold.id),
+                                  'critical_level',
+                                  parseFloat(e.target.value) || 0
+                                )
+                              }
+                              disabled={editingConcentrationThreshold !== threshold.id}
+                              className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 disabled:bg-gray-50 disabled:text-gray-500"
+                            />
+                          </div>
+                        </div>
+
+                        <div className="flex justify-end gap-2 mt-3 pt-3 border-t border-gray-200">
+                          {editingConcentrationThreshold === threshold.id ? (
+                            <>
+                              <button
+                                onClick={() => {
+                                  setEditingConcentrationThreshold(null);
+                                  fetchConcentrationThresholds();
+                                }}
+                                disabled={saving}
+                                className="px-3 py-1.5 text-sm text-gray-600 border border-gray-300 rounded-lg hover:bg-gray-50 disabled:opacity-50"
+                              >
+                                Cancel
+                              </button>
+                              <button
+                                onClick={() => handleSaveConcentrationThreshold(String(threshold.id))}
+                                disabled={saving}
+                                className="px-3 py-1.5 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
+                              >
+                                {saving ? 'Saving...' : 'Save'}
+                              </button>
+                            </>
+                          ) : (
+                            <button
+                              onClick={() => setEditingConcentrationThreshold(String(threshold.id))}
+                              className="px-3 py-1.5 text-sm text-blue-600 border border-blue-600 rounded-lg hover:bg-blue-50"
+                            >
+                              Edit
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+
+                <div className="mt-4 pt-4 border-t border-gray-200">
+                  <div className="flex items-start gap-2 text-xs text-gray-600">
+                    <Info className="w-4 h-4 mt-0.5 flex-shrink-0" />
+                    <div>
+                      <p className="font-medium">About Concentration Thresholds</p>
+                      <p className="mt-1">
+                        These thresholds are used to detect concentration risk in the Concentration Dashboard.
+                        Warning levels trigger alerts when exceeded, and critical levels indicate severe risk exposure.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex justify-end pt-4 border-t border-gray-200">
+                <button
+                  onClick={handleSaveOrgSettings}
+                  disabled={saving}
+                  className="flex items-center gap-2 px-6 py-2.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:bg-gray-400"
+                >
+                  <Save className="w-5 h-5" />
+                  {saving ? 'Saving...' : 'Save Organization Settings'}
+                </button>
+              </div>
+            </div>
+          )}
+
+          {activeTab === 'workflow' && canConfigureAssessment() && currentOrganization && (
+            <div className="space-y-8">
+              <div className="flex items-center gap-2">
+                <GitBranch className="w-5 h-5 text-blue-600" />
+                <h2 className="text-lg font-semibold text-gray-900">
+                  Workflow Configuration - {currentOrganization.name}
+                </h2>
+              </div>
+
+              <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
+                <div className="flex items-start gap-2">
+                  <Info className="w-5 h-5 text-blue-600 mt-0.5" />
+                  <div className="text-sm text-blue-700">
+                    <p className="font-medium">Tier-Based Workflow Routing</p>
+                    <p className="mt-1">
+                      Configure how onboarding requests are routed based on vendor risk tier.
+                      Higher risk tiers typically require 2nd Line review, while lower risk
+                      tiers can be fast-tracked through 1B approval.
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              <div className="border border-gray-200 rounded-lg p-5">
+                <div className="flex items-center gap-2 mb-4">
+                  <Shield className="w-5 h-5 text-emerald-600" />
+                  <h3 className="font-semibold text-gray-900">Fast-Track Approval</h3>
+                </div>
+
+                <label className="flex items-center gap-3">
+                  <input
+                    type="checkbox"
+                    checked={enableFastTrackApproval}
+                    onChange={(e) => setEnableFastTrackApproval(e.target.checked)}
+                    className="w-4 h-4 text-blue-600 rounded border-gray-300 focus:ring-blue-500"
+                  />
+                  <div>
+                    <span className="text-sm font-medium text-gray-700">Enable Fast-Track Approval</span>
+                    <p className="text-xs text-gray-500">
+                      Allow 1B coordinators to approve low-risk vendors (Tier 1-2) without 2nd Line review
+                    </p>
+                  </div>
+                </label>
+              </div>
+
+              <div className="border border-gray-200 rounded-lg overflow-hidden">
+                <div className="px-5 py-4 bg-gray-50 border-b border-gray-200">
+                  <h3 className="font-semibold text-gray-900">Tier-Based Routing Rules</h3>
+                  <p className="text-sm text-gray-500 mt-1">
+                    Configure review requirements for each risk tier
+                  </p>
+                </div>
+
+                <div className="overflow-x-auto">
+                  <table className="min-w-full divide-y divide-gray-200">
+                    <thead className="bg-gray-50">
+                      <tr>
+                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Risk Tier</th>
+                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Require 2nd Line</th>
+                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Default Reviewer</th>
+                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Auto-Approve Eligible</th>
+                      </tr>
+                    </thead>
+                    <tbody className="bg-white divide-y divide-gray-200">
+                      {(['tier_5', 'tier_4', 'tier_3', 'tier_2', 'tier_1'] as const).map((tier) => {
+                        const tierLabels: Record<string, { label: string; color: string }> = {
+                          tier_5: { label: 'Tier 5 - Critical', color: 'bg-red-100 text-red-800' },
+                          tier_4: { label: 'Tier 4 - High', color: 'bg-orange-100 text-orange-800' },
+                          tier_3: { label: 'Tier 3 - Moderate', color: 'bg-amber-100 text-amber-800' },
+                          tier_2: { label: 'Tier 2 - Low', color: 'bg-emerald-100 text-emerald-800' },
+                          tier_1: { label: 'Tier 1 - Informational', color: 'bg-slate-100 text-slate-600' },
+                        };
+                        const tierInfo = tierLabels[tier];
+                        const rule = tierRoutingRules[tier];
+
+                        return (
+                          <tr key={tier} className="hover:bg-gray-50">
+                            <td className="px-4 py-3">
+                              <span className={`inline-flex px-2.5 py-1 rounded-full text-xs font-medium ${tierInfo.color}`}>
+                                {tierInfo.label}
+                              </span>
+                            </td>
+                            <td className="px-4 py-3">
+                              <input
+                                type="checkbox"
+                                checked={rule.require_2nd_line}
+                                onChange={(e) => setTierRoutingRules(prev => ({
+                                  ...prev,
+                                  [tier]: { ...prev[tier], require_2nd_line: e.target.checked }
+                                }))}
+                                className="w-4 h-4 text-blue-600 rounded border-gray-300 focus:ring-blue-500"
+                              />
+                            </td>
+                            <td className="px-4 py-3">
+                              <select
+                                value={rule.default_reviewer}
+                                onChange={(e) => setTierRoutingRules(prev => ({
+                                  ...prev,
+                                  [tier]: { ...prev[tier], default_reviewer: e.target.value }
+                                }))}
+                                className="px-2 py-1.5 text-sm border border-gray-300 rounded focus:ring-2 focus:ring-blue-500"
+                              >
+                                <option value="1b">1B Coordinator</option>
+                                <option value="2nd">2nd Line Risk</option>
+                              </select>
+                            </td>
+                            <td className="px-4 py-3">
+                              <input
+                                type="checkbox"
+                                checked={rule.auto_approve_eligible}
+                                onChange={(e) => setTierRoutingRules(prev => ({
+                                  ...prev,
+                                  [tier]: { ...prev[tier], auto_approve_eligible: e.target.checked }
+                                }))}
+                                disabled={rule.require_2nd_line}
+                                className="w-4 h-4 text-blue-600 rounded border-gray-300 focus:ring-blue-500 disabled:opacity-50"
+                              />
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              <div className="border border-gray-200 rounded-lg overflow-hidden">
+                <div className="px-5 py-4 bg-gray-50 border-b border-gray-200">
+                  <h3 className="font-semibold text-gray-900">Reassessment Frequencies</h3>
+                  <p className="text-sm text-gray-500 mt-1">
+                    Configure how often vendors in each tier require periodic reassessment (in months)
+                  </p>
+                </div>
+
+                <div className="p-5">
+                  <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
+                    {(['tier_5', 'tier_4', 'tier_3', 'tier_2', 'tier_1'] as const).map((tier) => {
+                      const tierLabels: Record<string, string> = {
+                        tier_5: 'Critical',
+                        tier_4: 'High',
+                        tier_3: 'Moderate',
+                        tier_2: 'Low',
+                        tier_1: 'Informational',
+                      };
+
+                      return (
+                        <div key={tier} className="border border-gray-200 rounded-lg p-4">
+                          <label className="block text-sm font-medium text-gray-700 mb-2">
+                            {tierLabels[tier]}
+                          </label>
+                          <div className="flex items-center gap-2">
+                            <input
+                              type="number"
+                              min="1"
+                              max="60"
+                              value={reassessmentFrequencies[tier]}
+                              onChange={(e) => setReassessmentFrequencies(prev => ({
+                                ...prev,
+                                [tier]: parseInt(e.target.value) || 12
+                              }))}
+                              className="w-20 px-2 py-1.5 text-sm border border-gray-300 rounded focus:ring-2 focus:ring-blue-500"
+                            />
+                            <span className="text-sm text-gray-500">months</span>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex justify-end pt-4 border-t border-gray-200">
+                <button
+                  onClick={handleSaveWorkflowConfig}
+                  disabled={saving}
+                  className="flex items-center gap-2 px-6 py-2.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:bg-gray-400"
+                >
+                  <Save className="w-5 h-5" />
+                  {saving ? 'Saving...' : 'Save Workflow Configuration'}
+                </button>
+              </div>
+
+              <div className="border-t border-gray-200 pt-8 mt-8">
+                <div className="flex items-center gap-2 mb-4">
+                  <Shield className="w-5 h-5 text-rose-600" />
+                  <h3 className="text-lg font-semibold text-gray-900">Senior Management Approval</h3>
+                </div>
+
+                <div className="bg-rose-50 border border-rose-200 rounded-lg p-4 mb-6">
+                  <div className="flex items-start gap-2">
+                    <AlertTriangle className="w-5 h-5 text-rose-600 mt-0.5" />
+                    <div className="text-sm text-rose-700">
+                      <p className="font-medium">OSFI B-10 Section 2.1.2 Compliance</p>
+                      <p className="mt-1">
+                        Critical and high-risk vendor engagements require approval at an appropriate
+                        level of management. Configure which tiers require senior management sign-off
+                        and designate authorized approvers.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                  <div className="border border-gray-200 rounded-lg p-5">
+                    <h4 className="font-medium text-gray-900 mb-4">Tiers Requiring Senior Approval</h4>
+                    <p className="text-sm text-gray-500 mb-4">
+                      Select which risk tiers require senior management approval before vendor onboarding can proceed.
+                    </p>
+
+                    <div className="space-y-3">
+                      {[
+                        { value: 'tier_5_critical', label: 'Tier 5 - Critical', color: 'bg-red-100 text-red-800' },
+                        { value: 'tier_4_high', label: 'Tier 4 - High', color: 'bg-orange-100 text-orange-800' },
+                        { value: 'tier_3_moderate', label: 'Tier 3 - Moderate', color: 'bg-amber-100 text-amber-800' },
+                      ].map((tier) => (
+                        <label key={tier.value} className="flex items-center gap-3">
+                          <input
+                            type="checkbox"
+                            checked={seniorApprovalTiers.includes(tier.value)}
+                            onChange={(e) => {
+                              if (e.target.checked) {
+                                setSeniorApprovalTiers(prev => [...prev, tier.value]);
+                              } else {
+                                setSeniorApprovalTiers(prev => prev.filter(t => t !== tier.value));
+                              }
+                            }}
+                            className="w-4 h-4 text-blue-600 rounded border-gray-300 focus:ring-blue-500"
+                          />
+                          <span className={`px-2.5 py-1 rounded-full text-xs font-medium ${tier.color}`}>
+                            {tier.label}
+                          </span>
+                        </label>
+                      ))}
+                    </div>
+
+                    <div className="mt-6 pt-4 border-t border-gray-200 space-y-4">
+                      <label className="flex items-center gap-3">
+                        <input
+                          type="checkbox"
+                          checked={seniorApprovalConfig?.require_for_outsourcing ?? true}
+                          onChange={(e) => setSeniorApprovalConfig(prev => ({
+                            ...prev!,
+                            require_for_outsourcing: e.target.checked,
+                          }))}
+                          className="w-4 h-4 text-blue-600 rounded border-gray-300 focus:ring-blue-500"
+                        />
+                        <div>
+                          <span className="text-sm font-medium text-gray-700">Require for Outsourcing</span>
+                          <p className="text-xs text-gray-500">Always require senior approval for outsourcing arrangements</p>
+                        </div>
+                      </label>
+
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">
+                          Contract Value Threshold (CAD)
+                        </label>
+                        <input
+                          type="number"
+                          min="0"
+                          step="10000"
+                          value={seniorApprovalConfig?.contract_value_threshold_cad || ''}
+                          onChange={(e) => setSeniorApprovalConfig(prev => ({
+                            ...prev!,
+                            contract_value_threshold_cad: parseInt(e.target.value) || undefined,
+                          }))}
+                          placeholder="e.g., 1000000"
+                          className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                        />
+                        <p className="mt-1 text-xs text-gray-500">
+                          Require senior approval for contracts above this value (optional)
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="border border-gray-200 rounded-lg p-5">
+                    <h4 className="font-medium text-gray-900 mb-4">Designated Senior Approvers</h4>
+                    <p className="text-sm text-gray-500 mb-4">
+                      Add users who are authorized to provide senior management approval for vendor onboarding.
+                    </p>
+
+                    {seniorApprovers.length > 0 ? (
+                      <div className="space-y-2 mb-4">
+                        {seniorApprovers.map((approver) => (
+                          <div
+                            key={approver.id}
+                            className="flex items-center justify-between p-3 bg-gray-50 rounded-lg"
+                          >
+                            <div>
+                              <p className="text-sm font-medium text-gray-900">
+                                {approver.user?.full_name || approver.user?.email || 'Unknown User'}
+                              </p>
+                              {approver.user?.email && approver.user?.full_name && (
+                                <p className="text-xs text-gray-500">{approver.user.email}</p>
+                              )}
+                              {approver.title && (
+                                <p className="text-xs text-gray-500 mt-0.5">{approver.title}</p>
+                              )}
+                            </div>
+                            <button
+                              onClick={() => handleRemoveSeniorApprover(approver.id)}
+                              disabled={saving}
+                              className="text-red-600 hover:text-red-800 text-sm font-medium disabled:opacity-50"
+                            >
+                              Remove
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="text-center py-6 bg-gray-50 rounded-lg mb-4">
+                        <Users className="w-8 h-8 text-gray-400 mx-auto mb-2" />
+                        <p className="text-sm text-gray-500">No senior approvers configured</p>
+                      </div>
+                    )}
+
+                    <div className="flex gap-2">
+                      <select
+                        value={newApproverUserId}
+                        onChange={(e) => setNewApproverUserId(e.target.value)}
+                        className="flex-1 px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                      >
+                        <option value="">Select a user...</option>
+                        {orgUsers
+                          .filter(u => !seniorApprovers.some(a => a.user_id === u.id))
+                          .map((user) => (
+                            <option key={user.id} value={user.id}>
+                              {user.full_name || user.email}
+                            </option>
+                          ))}
+                      </select>
+                      <button
+                        onClick={handleAddSeniorApprover}
+                        disabled={saving || !newApproverUserId}
+                        className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:bg-gray-400"
+                      >
+                        Add
+                      </button>
+                    </div>
+
+                    <div className="mt-6 pt-4 border-t border-gray-200 space-y-3">
+                      <div className="grid grid-cols-2 gap-4">
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 mb-1">
+                            Reminder After (Days)
+                          </label>
+                          <input
+                            type="number"
+                            min="1"
+                            max="30"
+                            value={seniorApprovalConfig?.reminder_after_days || 1}
+                            onChange={(e) => setSeniorApprovalConfig(prev => ({
+                              ...prev!,
+                              reminder_after_days: parseInt(e.target.value) || 1,
+                            }))}
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 mb-1">
+                            Auto-Escalate After (Days)
+                          </label>
+                          <input
+                            type="number"
+                            min="1"
+                            max="30"
+                            value={seniorApprovalConfig?.auto_escalate_after_days || 3}
+                            onChange={(e) => setSeniorApprovalConfig(prev => ({
+                              ...prev!,
+                              auto_escalate_after_days: parseInt(e.target.value) || 3,
+                            }))}
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                          />
+                        </div>
+                      </div>
+
+                      <label className="flex items-center gap-3">
+                        <input
+                          type="checkbox"
+                          checked={seniorApprovalConfig?.notify_on_assignment ?? true}
+                          onChange={(e) => setSeniorApprovalConfig(prev => ({
+                            ...prev!,
+                            notify_on_assignment: e.target.checked,
+                          }))}
+                          className="w-4 h-4 text-blue-600 rounded border-gray-300 focus:ring-blue-500"
+                        />
+                        <span className="text-sm text-gray-700">Email approvers when assigned</span>
+                      </label>
+
+                      <label className="flex items-center gap-3">
+                        <input
+                          type="checkbox"
+                          checked={seniorApprovalConfig?.notify_on_completion ?? true}
+                          onChange={(e) => setSeniorApprovalConfig(prev => ({
+                            ...prev!,
+                            notify_on_completion: e.target.checked,
+                          }))}
+                          className="w-4 h-4 text-blue-600 rounded border-gray-300 focus:ring-blue-500"
+                        />
+                        <span className="text-sm text-gray-700">Notify requestor on approval/rejection</span>
+                      </label>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="flex justify-end pt-4 mt-6 border-t border-gray-200">
+                  <button
+                    onClick={handleSaveSeniorApprovalConfig}
+                    disabled={saving}
+                    className="flex items-center gap-2 px-6 py-2.5 bg-rose-600 text-white rounded-lg hover:bg-rose-700 transition-colors disabled:bg-gray-400"
+                  >
+                    <Save className="w-5 h-5" />
+                    {saving ? 'Saving...' : 'Save Senior Approval Config'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {activeTab === 'weights' && (isRiskManager || canManageOrgSettings) && (
+            <div className="space-y-6">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Scale className="w-5 h-5 text-blue-600" />
+                  <h2 className="text-lg font-semibold text-gray-900">Category Risk Weights</h2>
+                </div>
+                <button
+                  onClick={handleResetWeights}
+                  className="flex items-center gap-2 px-3 py-1.5 text-sm text-gray-600 border border-gray-300 rounded-lg hover:bg-gray-50"
+                >
+                  <RefreshCw className="w-4 h-4" />
+                  Reset to Defaults
+                </button>
+              </div>
+
+              <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
+                <div className="flex items-start gap-2">
+                  <Info className="w-5 h-5 text-blue-600 mt-0.5" />
+                  <div className="text-sm text-blue-700">
+                    <p className="font-medium">Weight Configuration</p>
+                    <p className="mt-1">
+                      Impact weights and Likelihood weights must each sum to 1.0. These weights determine
+                      how different factors contribute to the overall risk score for each service category.
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              {categoryWeights.length === 0 ? (
+                <div className="bg-amber-50 border border-amber-200 rounded-lg p-4">
+                  <div className="flex items-start gap-2">
+                    <AlertTriangle className="w-5 h-5 text-amber-600 mt-0.5" />
+                    <div className="text-sm text-amber-700">
+                      <p className="font-medium">No Categories Available</p>
+                      <p className="mt-1">
+                        Category weights could not be loaded. This may be a configuration issue.
+                        Please contact your system administrator or try refreshing the page.
+                      </p>
+                      <button
+                        onClick={fetchData}
+                        className="mt-2 flex items-center gap-1 text-amber-800 hover:text-amber-900 font-medium"
+                      >
+                        <RefreshCw className="w-4 h-4" />
+                        Retry
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Select Category</label>
+                  <select
+                    value={selectedCategory}
+                    onChange={(e) => setSelectedCategory(e.target.value)}
+                    className="w-full max-w-md px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                  >
+                    {categoryWeights.map((cat) => (
+                      <option key={String(cat.category)} value={String(cat.category)}>
+                        {String(cat.category_display_name)}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              {selectedCategoryData && (
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                  <div className="border border-gray-200 rounded-lg p-4">
+                    <div className="flex items-center justify-between mb-4">
+                      <h3 className="font-semibold text-gray-900">Impact Factors</h3>
+                      <span className={`text-sm font-medium ${Math.abs(impactSum - 1) < 0.001 ? 'text-emerald-600' : 'text-red-600'}`}>
+                        Sum: {impactSum.toFixed(3)}
+                      </span>
+                    </div>
+                    <div className="space-y-4">
+                      {IMPACT_FACTORS.map((factor) => (
+                        <div key={factor.key}>
+                          <div className="flex items-center justify-between mb-1">
+                            <label className="text-sm font-medium text-gray-700">{factor.label}</label>
+                            <span className="text-xs text-gray-500">{factor.description}</span>
+                          </div>
+                          <input
+                            type="number"
+                            step="0.01"
+                            min="0"
+                            max="1"
+                            value={Number(selectedCategoryData[factor.key]) || 0}
+                            onChange={(e) => updateWeight(factor.key, e.target.value)}
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="border border-gray-200 rounded-lg p-4">
+                    <div className="flex items-center justify-between mb-4">
+                      <h3 className="font-semibold text-gray-900">Likelihood Factors</h3>
+                      <span className={`text-sm font-medium ${Math.abs(likelihoodSum - 1) < 0.001 ? 'text-emerald-600' : 'text-red-600'}`}>
+                        Sum: {likelihoodSum.toFixed(3)}
+                      </span>
+                    </div>
+                    <div className="space-y-4">
+                      {LIKELIHOOD_FACTORS.map((factor) => (
+                        <div key={factor.key}>
+                          <div className="flex items-center justify-between mb-1">
+                            <label className="text-sm font-medium text-gray-700">{factor.label}</label>
+                            <span className="text-xs text-gray-500">{factor.description}</span>
+                          </div>
+                          <input
+                            type="number"
+                            step="0.01"
+                            min="0"
+                            max="1"
+                            value={Number(selectedCategoryData[factor.key]) || 0}
+                            onChange={(e) => updateWeight(factor.key, e.target.value)}
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              <div className="flex justify-end">
+                <button
+                  onClick={handleSaveWeights}
+                  disabled={saving || Math.abs(impactSum - 1) > 0.001 || Math.abs(likelihoodSum - 1) > 0.001}
+                  className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:bg-gray-400"
+                >
+                  <Save className="w-5 h-5" />
+                  {saving ? 'Saving...' : 'Save Weights'}
+                </button>
+              </div>
+            </div>
+          )}
+
+          {activeTab === 'tiers' && (isRiskManager || canManageOrgSettings) && (
+            <div className="space-y-6">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Layers className="w-5 h-5 text-blue-600" />
+                  <h2 className="text-lg font-semibold text-gray-900">Tier Configuration</h2>
+                </div>
+                <button
+                  onClick={handleResetTierConfig}
+                  className="flex items-center gap-2 px-3 py-1.5 text-sm text-gray-600 border border-gray-300 rounded-lg hover:bg-gray-50"
+                >
+                  <RefreshCw className="w-4 h-4" />
+                  Reset to Defaults
+                </button>
+              </div>
+
+              <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
+                <div className="flex items-start gap-2">
+                  <Info className="w-5 h-5 text-blue-600 mt-0.5" />
+                  <div className="text-sm text-blue-700">
+                    <p className="font-medium">Tier Threshold Configuration</p>
+                    <p className="mt-1">
+                      Configure the risk score thresholds that determine vendor tier assignments.
+                      Higher tiers should have higher minimum scores. Review frequency determines
+                      how often vendors in each tier require reassessment.
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              <div className="mb-6">
+                <h3 className="text-sm font-medium text-gray-700 mb-3">Risk Score Scale</h3>
+                <div className="relative h-12 bg-gradient-to-r from-emerald-100 via-amber-100 to-red-100 rounded-lg overflow-hidden">
+                  <div className="absolute inset-0 flex">
+                    {tierConfig.map((tier, idx) => {
+                      const colors = TIER_COLORS[tier.tier_color] || TIER_COLORS.slate;
+                      const nextTier = tierConfig[idx - 1];
+                      const width = nextTier
+                        ? ((nextTier.min_risk_score - tier.min_risk_score) / 25) * 100
+                        : ((25 - tier.min_risk_score) / 25) * 100;
+                      const left = (tier.min_risk_score / 25) * 100;
+
+                      return (
+                        <div
+                          key={tier.tier_level}
+                          className={`absolute h-full flex items-center justify-center text-xs font-medium ${colors.text} border-r border-white/50`}
+                          style={{ left: `${left}%`, width: `${width}%` }}
+                        >
+                          <span className="truncate px-1">{tier.tier_label}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <div className="absolute bottom-0 left-0 right-0 flex justify-between px-2 text-[10px] text-gray-600">
+                    <span>0</span>
+                    <span>5</span>
+                    <span>10</span>
+                    <span>15</span>
+                    <span>20</span>
+                    <span>25</span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="overflow-x-auto">
+                <table className="min-w-full divide-y divide-gray-200">
+                  <thead className="bg-gray-50">
+                    <tr>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Tier</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Min Risk Score</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Review Frequency</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Description</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Current Vendors</th>
+                    </tr>
+                  </thead>
+                  <tbody className="bg-white divide-y divide-gray-200">
+                    {tierConfig.map((tier) => {
+                      const colors = TIER_COLORS[tier.tier_color] || TIER_COLORS.slate;
+                      const vendorCount = vendorPreviewData.find(v => v.tier === tier.tier_level)?.count || 0;
+
+                      return (
+                        <tr key={tier.tier_level} className="hover:bg-gray-50">
+                          <td className="px-4 py-3">
+                            <div className="flex items-center gap-2">
+                              <span className={`px-2.5 py-1 rounded-full text-xs font-medium ${colors.bg} ${colors.text}`}>
+                                {tier.tier_label}
+                              </span>
+                            </div>
+                          </td>
+                          <td className="px-4 py-3">
+                            <div className="flex items-center gap-2">
+                              <span className="text-gray-500 text-sm">≥</span>
+                              <input
+                                type="number"
+                                step="0.5"
+                                min="0"
+                                max="25"
+                                value={tier.min_risk_score}
+                                onChange={(e) => updateTierConfig(tier.tier_level, 'min_risk_score', parseFloat(e.target.value) || 0)}
+                                className="w-20 px-2 py-1.5 text-sm border border-gray-300 rounded focus:ring-2 focus:ring-blue-500"
+                              />
+                            </div>
+                          </td>
+                          <td className="px-4 py-3">
+                            <div className="flex items-center gap-2">
+                              <input
+                                type="number"
+                                min="0"
+                                max="1095"
+                                value={tier.review_frequency_days || ''}
+                                onChange={(e) => updateTierConfig(tier.tier_level, 'review_frequency_days', e.target.value ? parseInt(e.target.value) : null)}
+                                placeholder="N/A"
+                                className="w-20 px-2 py-1.5 text-sm border border-gray-300 rounded focus:ring-2 focus:ring-blue-500"
+                              />
+                              <span className="text-sm text-gray-500">days</span>
+                            </div>
+                          </td>
+                          <td className="px-4 py-3">
+                            <input
+                              type="text"
+                              value={tier.tier_description || ''}
+                              onChange={(e) => updateTierConfig(tier.tier_level, 'tier_description', e.target.value)}
+                              className="w-full px-2 py-1.5 text-sm border border-gray-300 rounded focus:ring-2 focus:ring-blue-500"
+                            />
+                          </td>
+                          <td className="px-4 py-3">
+                            <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
+                              vendorCount > 0 ? colors.bg + ' ' + colors.text : 'bg-gray-100 text-gray-500'
+                            }`}>
+                              {vendorCount} vendor{vendorCount !== 1 ? 's' : ''}
+                            </span>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+
+              <div className="flex justify-end">
+                <button
+                  onClick={handleSaveTierConfig}
+                  disabled={saving}
+                  className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:bg-gray-400"
+                >
+                  <Save className="w-5 h-5" />
+                  {saving ? 'Saving...' : 'Save Tier Configuration'}
+                </button>
+              </div>
+
+              <div className="border-t border-gray-200 pt-6">
+                <div className="flex items-center justify-between mb-4">
+                  <div className="flex items-center gap-2">
+                    <Shield className="w-5 h-5 text-emerald-600" />
+                    <h3 className="text-lg font-semibold text-gray-900">OSFI B-10 Adjustment Weights</h3>
+                  </div>
+                  <button
+                    onClick={handleResetOsfiWeights}
+                    className="flex items-center gap-2 px-3 py-1.5 text-sm text-gray-600 border border-gray-300 rounded-lg hover:bg-gray-50"
+                  >
+                    <RefreshCw className="w-4 h-4" />
+                    Reset to Defaults
+                  </button>
+                </div>
+
+                <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-4 mb-4">
+                  <div className="flex items-start gap-2">
+                    <Info className="w-5 h-5 text-emerald-600 mt-0.5" />
+                    <div className="text-sm text-emerald-700">
+                      <p className="font-medium">OSFI Compliance Factors</p>
+                      <p className="mt-1">
+                        These weights determine how much OSFI B-10 compliance factors adjust the
+                        likelihood score in risk assessments. Higher weights mean greater impact
+                        on the final tier calculation.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                  {[
+                    { key: 'exit_strategy_weight', label: 'Exit Strategy', description: 'Documented transition and exit plans' },
+                    { key: 'bcp_weight', label: 'Business Continuity', description: 'BCP documentation and testing' },
+                    { key: 'incident_response_weight', label: 'Incident Response', description: 'Incident management capability' },
+                    { key: 'audit_rights_weight', label: 'Audit Rights', description: 'Contractual audit provisions' },
+                    { key: 'financial_viability_weight', label: 'Financial Viability', description: 'Financial stability assessment' },
+                    { key: 'insurance_weight', label: 'Insurance Coverage', description: 'Liability and cyber insurance' },
+                  ].map((factor) => (
+                    <div key={factor.key} className="border border-gray-200 rounded-lg p-4">
+                      <label className="block text-sm font-medium text-gray-700 mb-1">{factor.label}</label>
+                      <p className="text-xs text-gray-500 mb-2">{factor.description}</p>
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="number"
+                          step="0.01"
+                          min="0"
+                          max="1"
+                          value={osfiWeights[factor.key as keyof OSFIWeights] || 0}
+                          onChange={(e) => setOsfiWeights(prev => ({
+                            ...prev,
+                            [factor.key]: parseFloat(e.target.value) || 0
+                          }))}
+                          className="w-24 px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                        />
+                        <span className="text-sm text-gray-500">weight</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="flex justify-end mt-4">
+                  <button
+                    onClick={handleSaveOsfiWeights}
+                    disabled={saving}
+                    className="flex items-center gap-2 px-4 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition-colors disabled:bg-gray-400"
+                  >
+                    <Save className="w-5 h-5" />
+                    {saving ? 'Saving...' : 'Save OSFI Weights'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {activeTab === 'auto-critical' && (isRiskManager || canManageOrgSettings) && currentOrganization && (
+            <AutoCriticalRulesSettings />
+          )}
+
+          {activeTab === 'templates' && (isRiskManager || canManageOrgSettings) && currentOrganization && (
+            <TemplateManagement organizationId={currentOrganization.id} />
+          )}
+
+          {activeTab === 'kri' && (isRiskManager || canManageOrgSettings) && (
+            <div className="space-y-6">
+              <div className="flex items-center gap-2">
+                <Activity className="w-5 h-5 text-blue-600" />
+                <h2 className="text-lg font-semibold text-gray-900">KRI Threshold Configuration</h2>
+              </div>
+
+              <div className="bg-amber-50 border border-amber-200 rounded-lg p-4">
+                <div className="flex items-start gap-2">
+                  <AlertTriangle className="w-5 h-5 text-amber-600 mt-0.5" />
+                  <div className="text-sm text-amber-700">
+                    <p className="font-medium">Threshold Guidelines</p>
+                    <p className="mt-1">
+                      For indicators where higher is better (e.g., compliance rates), Green should have the highest values.
+                      For indicators where lower is better (e.g., incident counts), Green should have the lowest values.
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              <div className="space-y-4">
+                {kriThresholds.map((kri) => (
+                  <div key={String(kri.kri_code)} className="border border-gray-200 rounded-lg p-4">
+                    <div className="flex items-center justify-between mb-4">
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <h3 className="font-semibold text-gray-900">{String(kri.kri_name)}</h3>
+                          <span className={`px-2 py-0.5 text-xs font-medium rounded-full ${
+                            kri.is_enabled ? 'bg-emerald-100 text-emerald-700' : 'bg-gray-100 text-gray-500'
+                          }`}>
+                            {kri.is_enabled ? 'Enabled' : 'Disabled'}
+                          </span>
+                        </div>
+                        <p className="text-sm text-gray-500 mt-1">{String(kri.description)}</p>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        {editingKRI === kri.kri_code ? (
+                          <>
+                            <button
+                              onClick={() => handleSaveKRI(String(kri.kri_code))}
+                              disabled={saving}
+                              className="px-3 py-1.5 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700"
+                            >
+                              Save
+                            </button>
+                            <button
+                              onClick={() => setEditingKRI(null)}
+                              className="px-3 py-1.5 text-sm text-gray-600 border border-gray-300 rounded-lg hover:bg-gray-50"
+                            >
+                              Cancel
+                            </button>
+                          </>
+                        ) : (
+                          <button
+                            onClick={() => setEditingKRI(String(kri.kri_code))}
+                            className="px-3 py-1.5 text-sm text-blue-600 border border-blue-300 rounded-lg hover:bg-blue-50"
+                          >
+                            Edit
+                          </button>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                      <div className="space-y-2">
+                        <label className="block text-xs font-medium text-emerald-700">Green Range</label>
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="number"
+                            value={kri.green_min ?? ''}
+                            onChange={(e) => updateKRI(String(kri.kri_code), 'green_min', parseFloat(e.target.value))}
+                            disabled={editingKRI !== kri.kri_code}
+                            className="w-full px-2 py-1.5 text-sm border border-gray-300 rounded disabled:bg-gray-50"
+                            placeholder="Min"
+                          />
+                          <span className="text-gray-400">-</span>
+                          <input
+                            type="number"
+                            value={kri.green_max ?? ''}
+                            onChange={(e) => updateKRI(String(kri.kri_code), 'green_max', parseFloat(e.target.value))}
+                            disabled={editingKRI !== kri.kri_code}
+                            className="w-full px-2 py-1.5 text-sm border border-gray-300 rounded disabled:bg-gray-50"
+                            placeholder="Max"
+                          />
+                        </div>
+                      </div>
+
+                      <div className="space-y-2">
+                        <label className="block text-xs font-medium text-amber-700">Amber Range</label>
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="number"
+                            value={kri.amber_min ?? ''}
+                            onChange={(e) => updateKRI(String(kri.kri_code), 'amber_min', parseFloat(e.target.value))}
+                            disabled={editingKRI !== kri.kri_code}
+                            className="w-full px-2 py-1.5 text-sm border border-gray-300 rounded disabled:bg-gray-50"
+                            placeholder="Min"
+                          />
+                          <span className="text-gray-400">-</span>
+                          <input
+                            type="number"
+                            value={kri.amber_max ?? ''}
+                            onChange={(e) => updateKRI(String(kri.kri_code), 'amber_max', parseFloat(e.target.value))}
+                            disabled={editingKRI !== kri.kri_code}
+                            className="w-full px-2 py-1.5 text-sm border border-gray-300 rounded disabled:bg-gray-50"
+                            placeholder="Max"
+                          />
+                        </div>
+                      </div>
+
+                      <div className="space-y-2">
+                        <label className="block text-xs font-medium text-red-700">Red Range</label>
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="number"
+                            value={kri.red_min ?? ''}
+                            onChange={(e) => updateKRI(String(kri.kri_code), 'red_min', parseFloat(e.target.value))}
+                            disabled={editingKRI !== kri.kri_code}
+                            className="w-full px-2 py-1.5 text-sm border border-gray-300 rounded disabled:bg-gray-50"
+                            placeholder="Min"
+                          />
+                          <span className="text-gray-400">-</span>
+                          <input
+                            type="number"
+                            value={kri.red_max ?? ''}
+                            onChange={(e) => updateKRI(String(kri.kri_code), 'red_max', parseFloat(e.target.value))}
+                            disabled={editingKRI !== kri.kri_code}
+                            className="w-full px-2 py-1.5 text-sm border border-gray-300 rounded disabled:bg-gray-50"
+                            placeholder="Max"
+                          />
+                        </div>
+                      </div>
+
+                      <div className="space-y-2">
+                        <label className="block text-xs font-medium text-gray-700">Options</label>
+                        <div className="space-y-1">
+                          <label className="flex items-center gap-2">
+                            <input
+                              type="checkbox"
+                              checked={Boolean(kri.is_enabled)}
+                              onChange={(e) => updateKRI(String(kri.kri_code), 'is_enabled', e.target.checked)}
+                              disabled={editingKRI !== kri.kri_code}
+                              className="w-4 h-4 text-blue-600 rounded"
+                            />
+                            <span className="text-xs text-gray-600">Enabled</span>
+                          </label>
+                          <label className="flex items-center gap-2">
+                            <input
+                              type="checkbox"
+                              checked={Boolean(kri.notify_on_red)}
+                              onChange={(e) => updateKRI(String(kri.kri_code), 'notify_on_red', e.target.checked)}
+                              disabled={editingKRI !== kri.kri_code}
+                              className="w-4 h-4 text-blue-600 rounded"
+                            />
+                            <span className="text-xs text-gray-600">Notify on Red</span>
+                          </label>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {activeTab === 'lifecycle' && (isRiskManager || canManageOrgSettings) && (
+            <div className="space-y-6">
+              <div className="flex items-center gap-2">
+                <GitBranch className="w-5 h-5 text-blue-600" />
+                <h2 className="text-lg font-semibold text-gray-900">Lifecycle Stage Configuration</h2>
+              </div>
+
+              <div className="overflow-x-auto">
+                <table className="min-w-full divide-y divide-gray-200">
+                  <thead className="bg-gray-50">
+                    <tr>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Order</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Stage</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Description</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Notify</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Escalation</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="bg-white divide-y divide-gray-200">
+                    {lifecycleConfig.map((stage) => (
+                      <tr key={String(stage.stage_code)} className="hover:bg-gray-50">
+                        <td className="px-4 py-3 text-sm text-gray-900">{String(stage.display_order)}</td>
+                        <td className="px-4 py-3">
+                          <input
+                            type="text"
+                            value={String(stage.stage_name)}
+                            onChange={(e) => updateLifecycle(String(stage.stage_code), 'stage_name', e.target.value)}
+                            className="w-full px-2 py-1 text-sm border border-gray-300 rounded"
+                          />
+                        </td>
+                        <td className="px-4 py-3">
+                          <input
+                            type="text"
+                            value={String(stage.description || '')}
+                            onChange={(e) => updateLifecycle(String(stage.stage_code), 'description', e.target.value)}
+                            className="w-full px-2 py-1 text-sm border border-gray-300 rounded"
+                          />
+                        </td>
+                        <td className="px-4 py-3">
+                          <input
+                            type="checkbox"
+                            checked={Boolean(stage.notification_on_enter)}
+                            onChange={(e) => updateLifecycle(String(stage.stage_code), 'notification_on_enter', e.target.checked)}
+                            className="w-4 h-4 text-blue-600 rounded"
+                          />
+                        </td>
+                        <td className="px-4 py-3">
+                          <input
+                            type="number"
+                            value={stage.days_until_escalation || ''}
+                            onChange={(e) => updateLifecycle(String(stage.stage_code), 'days_until_escalation', parseInt(e.target.value) || null)}
+                            placeholder="Days"
+                            className="w-20 px-2 py-1 text-sm border border-gray-300 rounded"
+                          />
+                        </td>
+                        <td className="px-4 py-3">
+                          <span className={`px-2 py-0.5 text-xs font-medium rounded-full ${
+                            stage.is_active ? 'bg-emerald-100 text-emerald-700' : 'bg-gray-100 text-gray-500'
+                          }`}>
+                            {stage.is_active ? 'Active' : 'Inactive'}
+                          </span>
+                        </td>
+                        <td className="px-4 py-3">
+                          <button
+                            onClick={() => handleSaveLifecycle(String(stage.stage_code))}
+                            disabled={saving}
+                            className="text-sm text-blue-600 hover:text-blue-800"
+                          >
+                            Save
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {activeTab === 'users' && (isRiskManager || canManageOrgSettings) && (
+            <div className="space-y-6">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Users className="w-5 h-5 text-blue-600" />
+                  <h2 className="text-lg font-semibold text-gray-900">User Management</h2>
+                </div>
+              </div>
+
+              <div className="overflow-x-auto">
+                <table className="min-w-full divide-y divide-gray-200">
+                  <thead className="bg-gray-50">
+                    <tr>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">User</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Email</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Department</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Role</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Joined</th>
+                    </tr>
+                  </thead>
+                  <tbody className="bg-white divide-y divide-gray-200">
+                    {users.map((u) => (
+                      <tr key={String(u.id)} className="hover:bg-gray-50">
+                        <td className="px-4 py-3">
+                          <div className="flex items-center gap-3">
+                            <div className="w-8 h-8 bg-slate-900 rounded-full flex items-center justify-center">
+                              <User className="w-4 h-4 text-white" />
+                            </div>
+                            <span className="text-sm font-medium text-gray-900">{String(u.full_name) || 'No Name'}</span>
+                          </div>
+                        </td>
+                        <td className="px-4 py-3 text-sm text-gray-500">{String(u.email)}</td>
+                        <td className="px-4 py-3 text-sm text-gray-500">{String(u.department) || '-'}</td>
+                        <td className="px-4 py-3">
+                          <select
+                            value={String(u.role) || 'business_user'}
+                            onChange={(e) => handleUpdateUserRole(String(u.id), e.target.value)}
+                            disabled={u.id === user?.id}
+                            className="px-2 py-1 text-sm border border-gray-300 rounded disabled:bg-gray-50"
+                          >
+                            {ROLE_OPTIONS.map((role) => (
+                              <option key={role.value} value={role.value}>{role.label}</option>
+                            ))}
+                          </select>
+                        </td>
+                        <td className="px-4 py-3 text-sm text-gray-500">
+                          {u.created_at ? new Date(String(u.created_at)).toLocaleDateString() : '-'}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              <div className="bg-gray-50 rounded-lg p-4">
+                <h3 className="text-sm font-semibold text-gray-900 mb-3">Role Permissions</h3>
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 text-sm">
+                  <div className="p-3 bg-white rounded border">
+                    <p className="font-medium text-gray-900">Risk Manager</p>
+                    <p className="text-xs text-gray-500 mt-1">Full access to all features, settings, and user management</p>
+                  </div>
+                  <div className="p-3 bg-white rounded border">
+                    <p className="font-medium text-gray-900">Vendor Owner</p>
+                    <p className="text-xs text-gray-500 mt-1">Create/edit vendors, manage contracts, report incidents</p>
+                  </div>
+                  <div className="p-3 bg-white rounded border">
+                    <p className="font-medium text-gray-900">Compliance Analyst</p>
+                    <p className="text-xs text-gray-500 mt-1">View all, create/approve assessments, export reports</p>
+                  </div>
+                  <div className="p-3 bg-white rounded border">
+                    <p className="font-medium text-gray-900">Auditor</p>
+                    <p className="text-xs text-gray-500 mt-1">Read-only access to all data and audit logs</p>
+                  </div>
+                  <div className="p-3 bg-white rounded border">
+                    <p className="font-medium text-gray-900">Executive</p>
+                    <p className="text-xs text-gray-500 mt-1">View dashboards, reports, and KRIs only</p>
+                  </div>
+                  <div className="p-3 bg-white rounded border">
+                    <p className="font-medium text-gray-900">Business User</p>
+                    <p className="text-xs text-gray-500 mt-1">View vendors and report incidents only</p>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
