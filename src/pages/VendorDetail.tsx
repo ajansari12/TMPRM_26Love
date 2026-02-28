@@ -4,6 +4,7 @@ import { supabase } from '../lib/supabase';
 import { logger } from '../lib/logger';
 import { useOrganization } from '../contexts/OrganizationContext';
 import { Vendor, TieringAssessment, AssessmentTaskType, OffboardingTask } from '../types';
+import RiskSummaryCard from '../components/ai/RiskSummaryCard';
 import { formatDate, getStatusColor, isValidUUID } from '../lib/utils';
 import { useAuth } from '../contexts/AuthContext';
 import {
@@ -1144,6 +1145,28 @@ export default function VendorDetail() {
                           </div>
                         </div>
                       </div>
+                    </div>
+
+                    {/* AI Risk Summary */}
+                    <div className="mt-4">
+                      <RiskSummaryCard
+                        vendorId={vendor.id}
+                        vendorData={{
+                          legal_name: vendor.legal_name,
+                          service_category: vendor.service_category,
+                          provider_type: vendor.provider_type,
+                          tier: vendor.tier,
+                          risk_rating: vendor.risk_rating,
+                          impact_score: vendor.impact_score,
+                          likelihood_score: vendor.likelihood_score,
+                          is_critical: vendor.is_critical,
+                          status: vendor.status,
+                          country: vendor.country,
+                          contract_value_cad: vendor.contract_value_cad,
+                          handles_sensitive_data: vendor.handles_sensitive_data,
+                          has_system_access: vendor.has_system_access,
+                        }}
+                      />
                     </div>
 
                     <div className="border-t border-slate-200 pt-4 space-y-2">

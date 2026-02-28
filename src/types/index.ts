@@ -292,10 +292,32 @@ export interface TieringAssessment {
   q53d_coverage_adequacy?: string;
   q53e_indemnification?: string;
 
+  // Control Effectiveness (Section 14.5)
+  ce1_security_certifications?: string[];
+  ce2_last_audit_findings?: string;
+  ce3_incident_response_maturity?: string;
+  ce4_data_protection_controls?: string;
+  ce5_bcp_testing_frequency?: string;
+  ce6_patch_management?: string;
+  ce7_security_awareness_training?: string;
+  ce8_penetration_testing?: string;
+
+  // ESG Risk (Section 12.5)
+  esg1_environmental_policy?: string;
+  esg2_labor_practices?: string;
+  esg3_board_governance?: string;
+  esg4_sanctions_pep_exposure?: string;
+  esg5_supply_chain_ethics?: string;
+  esg6_dei_metrics?: string;
+
   criticality_score?: number;
   impact_score?: number;
   likelihood_score?: number;
   risk_rating?: number;
+  inherent_risk_rating?: number;
+  residual_risk_rating?: number;
+  control_effectiveness_score?: number;
+  esg_score?: number;
   calculated_tier?: TierLevel;
   is_auto_critical: boolean;
 

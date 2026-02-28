@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Search, ArrowRight, Command, CornerDownLeft } from 'lucide-react';
+import { Search, ArrowRight, Command, CornerDownLeft, Brain } from 'lucide-react';
 import { buildNavigation, type NavItem, type NavGroup } from './layout/navigationConfig';
+import RiskQueryChat from './ai/RiskQueryChat';
 
 interface CommandPaletteProps {
   isOpen: boolean;
@@ -20,6 +21,7 @@ interface SearchResult {
 export default function CommandPalette({ isOpen, onClose, navigation }: CommandPaletteProps) {
   const [query, setQuery] = useState('');
   const [selectedIndex, setSelectedIndex] = useState(0);
+  const [activeTab, setActiveTab] = useState<'search' | 'ai'>('search');
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const navigate = useNavigate();
@@ -58,6 +60,7 @@ export default function CommandPalette({ isOpen, onClose, navigation }: CommandP
     if (isOpen) {
       setQuery('');
       setSelectedIndex(0);
+      setActiveTab('search');
       // Focus input after modal renders
       requestAnimationFrame(() => {
         inputRef.current?.focus();
@@ -120,6 +123,38 @@ export default function CommandPalette({ isOpen, onClose, navigation }: CommandP
 
       {/* Palette */}
       <div className="relative w-full max-w-xl bg-white rounded-xl shadow-2xl border border-slate-200 overflow-hidden">
+        {/* Tabs */}
+        <div className="flex border-b border-slate-200">
+          <button
+            onClick={() => setActiveTab('search')}
+            className={`flex items-center gap-1.5 px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ${
+              activeTab === 'search'
+                ? 'border-slate-900 text-slate-900'
+                : 'border-transparent text-slate-400 hover:text-slate-600'
+            }`}
+          >
+            <Search className="w-4 h-4" />
+            Search
+          </button>
+          <button
+            onClick={() => setActiveTab('ai')}
+            className={`flex items-center gap-1.5 px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ${
+              activeTab === 'ai'
+                ? 'border-purple-600 text-purple-600'
+                : 'border-transparent text-slate-400 hover:text-slate-600'
+            }`}
+          >
+            <Brain className="w-4 h-4" />
+            Ask AI
+          </button>
+        </div>
+
+        {activeTab === 'ai' ? (
+          <div className="h-[50vh]">
+            <RiskQueryChat />
+          </div>
+        ) : (
+        <>
         {/* Search input */}
         <div className="flex items-center border-b border-slate-200 px-4">
           <Search className="w-5 h-5 text-slate-400 shrink-0" />
@@ -210,6 +245,8 @@ export default function CommandPalette({ isOpen, onClose, navigation }: CommandP
             <Command className="w-3 h-3" />K to toggle
           </span>
         </div>
+        </>
+        )}
       </div>
     </div>
   );
