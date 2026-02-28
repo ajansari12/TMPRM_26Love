@@ -22,9 +22,10 @@ import {
   VendorArchetype,
 } from '../lib/vendorProfiles';
 import { Vendor, ServiceCategory, ProviderType, TieringAssessment, TierLevel, AssessmentTask } from '../types';
-import { ArrowLeft, ArrowRight, Save, CheckCircle, AlertCircle, Info, Shield, Building2, GitCompare, ArrowUpRight, ArrowDownRight, Minus, Zap, XCircle, Clock, Calendar, History, ChevronDown, ChevronUp, AlertTriangle } from 'lucide-react';
+import { ArrowLeft, ArrowRight, Save, CheckCircle, AlertCircle, Info, Shield, Building2, GitCompare, ArrowUpRight, ArrowDownRight, Minus, Zap, XCircle, Clock, Calendar, History, ChevronDown, ChevronUp, AlertTriangle, Brain } from 'lucide-react';
 import { isValidUUID } from '../lib/utils';
 import { CardSkeleton, TableSkeleton } from '../components/LoadingSkeleton';
+import AssessmentAssistant from '../components/ai/AssessmentAssistant';
 
 export default function AssessmentWizard() {
   const { vendorId } = useParams();
@@ -50,6 +51,7 @@ export default function AssessmentWizard() {
   const [currentTask, setCurrentTask] = useState<AssessmentTask | null>(null);
   const [assessmentHistory, setAssessmentHistory] = useState<TieringAssessment[]>([]);
   const [expandedQuestionHistory, setExpandedQuestionHistory] = useState<Record<string, boolean>>({});
+  const [aiAssistantEnabled, setAiAssistantEnabled] = useState(false);
 
   const assessmentType = searchParams.get('type') || 'initial';
   const previousAssessmentId = searchParams.get('previousAssessmentId');
@@ -920,7 +922,10 @@ export default function AssessmentWizard() {
   const totalQuestions = filteredSections.reduce((sum, s) => sum + s.questions.length, 0);
 
   return (
-    <div className="max-w-4xl mx-auto">
+    <div className={`${aiAssistantEnabled ? 'max-w-6xl' : 'max-w-4xl'} mx-auto`}>
+      <div className={`${aiAssistantEnabled ? 'flex gap-6' : ''}`}>
+      {/* Main content */}
+      <div className={`${aiAssistantEnabled ? 'flex-1 min-w-0' : ''}`}>
       <div className="mb-6">
         <button
           onClick={() => navigate(`/vendors/${vendorId}`)}
@@ -981,19 +986,32 @@ export default function AssessmentWizard() {
               )}
             </div>
           </div>
-          {previousAssessment && (
+          <div className="flex items-center gap-2">
+            {previousAssessment && (
+              <button
+                onClick={() => setShowComparison(!showComparison)}
+                className={`px-4 py-2 rounded-lg flex items-center space-x-2 transition-colors ${
+                  showComparison
+                    ? 'bg-blue-100 text-blue-700 border border-blue-200'
+                    : 'border border-slate-300 text-slate-700 hover:bg-slate-50'
+                }`}
+              >
+                <GitCompare className="w-4 h-4" />
+                <span>{showComparison ? 'Hide Comparison' : 'Compare with Previous'}</span>
+              </button>
+            )}
             <button
-              onClick={() => setShowComparison(!showComparison)}
+              onClick={() => setAiAssistantEnabled(!aiAssistantEnabled)}
               className={`px-4 py-2 rounded-lg flex items-center space-x-2 transition-colors ${
-                showComparison
-                  ? 'bg-blue-100 text-blue-700 border border-blue-200'
+                aiAssistantEnabled
+                  ? 'bg-purple-100 text-purple-700 border border-purple-200'
                   : 'border border-slate-300 text-slate-700 hover:bg-slate-50'
               }`}
             >
-              <GitCompare className="w-4 h-4" />
-              <span>{showComparison ? 'Hide Comparison' : 'Compare with Previous'}</span>
+              <Brain className="w-4 h-4" />
+              <span className="hidden sm:inline">{aiAssistantEnabled ? 'AI On' : 'AI Assist'}</span>
             </button>
-          )}
+          </div>
         </div>
 
         {vendorProfile && showProfileInfo && (
@@ -1712,6 +1730,29 @@ export default function AssessmentWizard() {
           </div>
         </div>
       )}
+      </div>
+      {/* AI Assistant Sidebar */}
+      {aiAssistantEnabled && vendor && !showSummary && (
+        <aside className="hidden lg:block w-80 shrink-0">
+          <div className="sticky top-24">
+            <AssessmentAssistant
+              vendorId={vendor.id}
+              vendorName={vendor.legal_name}
+              serviceCategory={vendor.service_category}
+              providerType={vendor.provider_type}
+              country={vendor.country}
+              currentSection={currentSection}
+              sections={filteredSections}
+              answers={answers}
+              previousAnswers={previousAssessment ? (previousAssessment as unknown as Record<string, unknown>) : undefined}
+              onAcceptSuggestion={(questionId, value) => {
+                setAnswers((prev) => ({ ...prev, [questionId]: value }));
+              }}
+            />
+          </div>
+        </aside>
+      )}
+      </div>
     </div>
   );
 }

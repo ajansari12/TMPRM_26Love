@@ -1060,3 +1060,120 @@ export interface OffboardingTask {
     email: string;
   };
 }
+
+// ============================================
+// AI Types
+// ============================================
+
+export type AIAction = 'assess-assist' | 'document-analyze' | 'risk-summarize' | 'risk-predict' | 'query';
+
+export interface AIUsageLog {
+  id: string;
+  organization_id: string;
+  user_id: string;
+  action: AIAction;
+  model: string;
+  tokens_input: number;
+  tokens_output: number;
+  vendor_id?: string | null;
+  created_at: string;
+}
+
+export interface AIFeedbackRecord {
+  id: string;
+  ai_usage_log_id: string;
+  user_id: string;
+  rating: 'thumbs_up' | 'thumbs_down';
+  correction_text?: string | null;
+  created_at: string;
+}
+
+export interface AIRiskSummary {
+  id: string;
+  vendor_id: string;
+  assessment_id?: string | null;
+  overview: string;
+  key_risks: string[];
+  strengths: string[];
+  recommendations: string[];
+  osfi_gaps: string[];
+  risk_trend: 'improving' | 'stable' | 'deteriorating';
+  confidence: 'high' | 'medium' | 'low';
+  generated_at: string;
+}
+
+export interface AIAssessmentSuggestion {
+  question_id: string;
+  suggested_value: string | string[];
+  confidence: 'high' | 'medium' | 'low';
+  reasoning: string;
+}
+
+export interface AIAssessmentResponse {
+  suggestions: AIAssessmentSuggestion[];
+  vendor_context: string;
+}
+
+export interface AIDocumentAnalysis {
+  document_type: string;
+  key_findings: string[];
+  compliance_gaps: string[];
+  expiry_dates: { item: string; date: string; days_until_expiry: number }[];
+  risk_flags: { severity: 'high' | 'medium' | 'low'; description: string }[];
+  extracted_data: Record<string, unknown>;
+  osfi_provisions?: Record<string, 'present' | 'missing' | 'partial'>;
+}
+
+export interface AIRiskPrediction {
+  vendor_id: string;
+  predicted_score_6m: number;
+  predicted_score_12m: number;
+  confidence_interval: { low: number; high: number };
+  trajectory: 'improving' | 'stable' | 'deteriorating';
+  risk_factors: {
+    factor: string;
+    direction: 'increasing' | 'decreasing' | 'stable';
+    impact: 'high' | 'medium' | 'low';
+  }[];
+  tier_change_risk: {
+    likely: boolean;
+    from_tier: string | null;
+    to_tier: string | null;
+  };
+  reasoning: string;
+  generated_at: string;
+}
+
+export interface AIQueryResponse {
+  answer: string;
+  entities: {
+    type: 'vendor' | 'assessment' | 'contract' | 'incident';
+    id: string | null;
+    label: string;
+  }[];
+  data_summary?: Record<string, unknown>;
+  follow_up_suggestions: string[];
+}
+
+export interface MonitoringSignal {
+  id: string;
+  vendor_id: string;
+  signal_type: 'news' | 'financial' | 'regulatory' | 'cyber' | 'esg';
+  severity: 'info' | 'warning' | 'critical';
+  title: string;
+  summary: string;
+  source_url?: string | null;
+  ai_confidence: 'high' | 'medium' | 'low';
+  created_at: string;
+  acknowledged_by?: string | null;
+  acknowledged_at?: string | null;
+}
+
+export interface FinancialRiskEstimate {
+  vendor_id: string;
+  ale_estimate: number;
+  loss_range_low: number;
+  loss_range_high: number;
+  loss_drivers: { driver: string; contribution_pct: number }[];
+  calculated_at: string;
+}
