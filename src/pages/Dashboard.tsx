@@ -9,6 +9,7 @@ import StatsCards from './dashboard/StatsCards';
 import RoleSections from './dashboard/RoleSections';
 import Charts from './dashboard/Charts';
 import VendorWidgets from './dashboard/VendorWidgets';
+import PortfolioInsights from '../components/ai/PortfolioInsights';
 
 export default function Dashboard() {
   const { currentOrganization, defenseLine } = useOrganization();
@@ -88,6 +89,12 @@ export default function Dashboard() {
           seniorApprovalMetrics={data.seniorApprovalMetrics}
           systemHealth={data.systemHealth}
         />
+      )}
+
+      {!access.is1A && (
+        <div className="mb-6">
+          <PortfolioInsights />
+        </div>
       )}
 
       {!access.is1A && <StatsCards stats={data.stats} />}

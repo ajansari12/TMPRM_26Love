@@ -15,6 +15,7 @@ import {
 import { BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 import { subMonths, format, differenceInHours, parseISO, startOfMonth, isSameMonth } from 'date-fns';
 import { logger } from '../lib/logger';
+import KRIAnomalyBadge, { detectKRIAnomalies, type AnomalyType } from '../components/KRIAnomalyBadge';
 
 interface KRIThreshold {
   id: string;
@@ -48,6 +49,7 @@ export default function KRIDashboard() {
   const [assessments, setAssessments] = useState<any[]>([]);
   const [kriThresholds, setKriThresholds] = useState<KRIThreshold[]>([]);
   const [breachedThresholds, setBreachedThresholds] = useState<KRIBreach[]>([]);
+  const [kriAnomalies, setKriAnomalies] = useState<Record<string, { type: AnomalyType; deviation: number; explanation: string }>>({});
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -215,6 +217,31 @@ export default function KRIDashboard() {
           });
       }
     }
+
+    // Anomaly detection — fetch historical values for each KRI
+    const anomalies: Record<string, { type: AnomalyType; deviation: number; explanation: string }> = {};
+    for (const threshold of thresholdsData) {
+      try {
+        const { data: historyData } = await supabase
+          .from('kri_history')
+          .select('calculated_value')
+          .eq('kri_code', threshold.kri_code)
+          .order('recorded_date', { ascending: true })
+          .limit(30);
+
+        if (historyData && historyData.length >= 5) {
+          const historicalValues = historyData.map(h => h.calculated_value);
+          const currentValue = mapKPItoKRI(threshold.kri_code, vendorsData, incidentsData, assessmentsData);
+          const anomaly = detectKRIAnomalies(historicalValues, currentValue, threshold.is_higher_better);
+          if (anomaly) {
+            anomalies[threshold.kri_code] = anomaly;
+          }
+        }
+      } catch {
+        // kri_history table may not exist
+      }
+    }
+    setKriAnomalies(anomalies);
 
     if (breaches.length > 0) {
       setBreachedThresholds(breaches);
@@ -444,6 +471,16 @@ export default function KRIDashboard() {
                   {getKPIBreach('KRI001')!.status === 'red' ? 'ABOVE THRESHOLD' : 'WARNING'}
                 </p>
               )}
+              {kriAnomalies['KRI001'] && (
+                <div className="mt-1.5">
+                  <KRIAnomalyBadge
+                    anomalyType={kriAnomalies['KRI001'].type}
+                    deviationValue={kriAnomalies['KRI001'].deviation}
+                    explanation={kriAnomalies['KRI001'].explanation}
+                    compact
+                  />
+                </div>
+              )}
             </div>
             <AlertCircle className="w-8 h-8 text-red-600" />
           </div>
@@ -465,6 +502,11 @@ export default function KRIDashboard() {
                 <p className="text-xs text-red-600 font-medium mt-1">
                   {getKPIBreach('KRI005')!.status === 'red' ? 'ABOVE THRESHOLD' : 'WARNING'}
                 </p>
+              )}
+              {kriAnomalies['KRI005'] && (
+                <div className="mt-1.5">
+                  <KRIAnomalyBadge anomalyType={kriAnomalies['KRI005'].type} deviationValue={kriAnomalies['KRI005'].deviation} explanation={kriAnomalies['KRI005'].explanation} compact />
+                </div>
               )}
             </div>
             <Activity className="w-8 h-8 text-orange-600" />
@@ -488,6 +530,11 @@ export default function KRIDashboard() {
                   {getKPIBreach('KRI006')!.status === 'red' ? 'ABOVE THRESHOLD' : 'WARNING'}
                 </p>
               )}
+              {kriAnomalies['KRI006'] && (
+                <div className="mt-1.5">
+                  <KRIAnomalyBadge anomalyType={kriAnomalies['KRI006'].type} deviationValue={kriAnomalies['KRI006'].deviation} explanation={kriAnomalies['KRI006'].explanation} compact />
+                </div>
+              )}
             </div>
             <TrendingUp className="w-8 h-8 text-red-600" />
           </div>
@@ -509,6 +556,11 @@ export default function KRIDashboard() {
                 <p className="text-xs text-red-600 font-medium mt-1">
                   {getKPIBreach('KRI002')!.status === 'red' ? 'BELOW THRESHOLD' : 'WARNING'}
                 </p>
+              )}
+              {kriAnomalies['KRI002'] && (
+                <div className="mt-1.5">
+                  <KRIAnomalyBadge anomalyType={kriAnomalies['KRI002'].type} deviationValue={kriAnomalies['KRI002'].deviation} explanation={kriAnomalies['KRI002'].explanation} compact />
+                </div>
               )}
             </div>
             <CheckCircle className="w-8 h-8 text-green-600" />

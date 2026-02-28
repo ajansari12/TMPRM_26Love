@@ -8,6 +8,7 @@ import RiskSummaryCard from '../components/ai/RiskSummaryCard';
 import FinancialRiskCard from '../components/FinancialRiskCard';
 import MonitoringSignals from '../components/MonitoringSignals';
 import RiskTrajectoryChart from '../components/ai/RiskTrajectoryChart';
+import DocumentAnalyzer from '../components/ai/DocumentAnalyzer';
 import { formatDate, getStatusColor, isValidUUID } from '../lib/utils';
 import { useAuth } from '../contexts/AuthContext';
 import {
@@ -1259,6 +1260,11 @@ export default function VendorDetail() {
                           risk_rating: a.risk_rating || 0,
                         })).filter(a => a.risk_rating > 0) || []}
                       />
+                    </div>
+
+                    {/* Document Analyzer */}
+                    <div className="mt-4">
+                      <DocumentAnalyzer vendorId={vendor.id} vendorName={vendor.legal_name} />
                     </div>
 
                     <div className="border-t border-slate-200 pt-4 space-y-2">
