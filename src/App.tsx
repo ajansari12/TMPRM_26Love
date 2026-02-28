@@ -60,6 +60,7 @@ const GlobalThirdParties = lazy(() => import('./pages/GlobalThirdParties'));
 const FIOnboarding = lazy(() => import('./pages/FIOnboarding'));
 const AcceptInvitation = lazy(() => import('./pages/AcceptInvitation'));
 const HelpCenter = lazy(() => import('./pages/HelpCenter'));
+const RegulatoryUpdates = lazy(() => import('./pages/RegulatoryUpdates'));
 
 function App() {
   return (
@@ -295,6 +296,20 @@ function App() {
                             ]}
                           >
                             <Attestations />
+                          </RoleGuard>
+                        }
+                      />
+                      <Route
+                        path="/regulatory-updates"
+                        element={
+                          <RoleGuard
+                            allowedLines={[
+                              '2nd',
+                              '3rd',
+                              'senior_management',
+                            ]}
+                          >
+                            <RegulatoryUpdates />
                           </RoleGuard>
                         }
                       />
